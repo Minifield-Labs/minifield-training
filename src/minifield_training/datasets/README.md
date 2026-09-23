@@ -1,10 +1,18 @@
-# Data admission and reusable datasets
+# Conversation admission
 
-Record parsing, schema validation, split assignment, tokenizer adapters, and verified preprocessing caches. Separate public model context from private labels and supervision. Assign holdouts before repetition or augmentation, and verify actual cache payloads. This is a host-safe layer; device arrays and batch execution belong elsewhere.
+`read_jsonl(path)` streams one neutral JSON envelope per line. Each envelope has
+an `id`, a caller-assigned `source_group`, ordered `messages`, and optional
+`tools` definitions. A message has `role` (`system`, `user`, `assistant`, or
+`tool`) and string `content`. Assistant `tool_calls` contain unique `id`, `name`,
+and JSON object `arguments`; tool replies carry the matching `tool_call_id`.
+The caller may set a fixed `source_group` for a plain export.
 
-Status: reserved. No implementation yet. Add a docstring-only `__init__.py`
-with the first real module; this directory currently contributes no executable
-behavior.
+```json
+{"id":"demo-1","source_group":"document-1","messages":[{"role":"user","content":"Find records"},{"role":"assistant","content":"Found 2."}]}
+```
 
-The executable dependency policy is [architecture.toml](../../../architecture.toml).
-Document each added public contract, consumer, example, and test here.
+Admission rejects malformed JSON, duplicate keys, nonfinite numbers, malformed
+roles, unmatched tool replies, and unknown envelope fields. Errors include the
+source filename and line number without quoting payloads. IDs and groups stay
+separate from model-visible messages. The reader holds one line at a time;
+callers supply a suitably bounded stream or file.
