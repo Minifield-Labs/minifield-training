@@ -1,0 +1,8 @@
+include AGENTS.md CONTRIBUTING.md README.md
+include .python-version .pylintrc
+include architecture.toml duplication.toml
+include uv.lock
+recursive-include src *.md py.typed
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include docs *.md *.json

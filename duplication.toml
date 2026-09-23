@@ -1,0 +1,6 @@
+# Changing a limit changes repository policy and requires a written review.
+# These are parsed statements, excluding scope docstrings. See docs/duplication.md.
+version = 1
+min_clone_statements = 12
+max_function_statements = 70
+max_module_statements = 350

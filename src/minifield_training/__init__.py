@@ -1,0 +1,1 @@
+"""Minifield training worker package."""

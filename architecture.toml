@@ -1,0 +1,85 @@
+# This is executable policy. Add a dependency only after documenting its owner.
+version = 1
+package = "minifield_training"
+source_root = "src/minifield_training"
+model_shared = ["contracts"]
+model_consumers = ["strategies"]
+# Exact, function-local dispatch edges may be added with a concrete adapter.
+# Example: { source = "execution.dispatch", target = "strategies.registry" }
+# They remain checked edges, but are excluded from host import-time closure.
+lazy_imports = []
+
+[modules.core]
+depends = []
+host_safe = true
+external = []
+
+[modules.kernels]
+depends = ["core"]
+host_safe = false
+external = []
+
+[modules.layers]
+depends = ["core", "kernels"]
+host_safe = false
+external = []
+
+[modules.models]
+depends = ["core", "kernels", "layers"]
+host_safe = false
+external = []
+
+[modules.optimizers]
+depends = ["core", "kernels"]
+host_safe = false
+external = []
+
+[modules.objectives]
+depends = ["core", "kernels", "models"]
+host_safe = false
+external = []
+
+[modules.artifacts]
+depends = ["core"]
+host_safe = true
+external = []
+
+[modules.datasets]
+depends = ["core", "artifacts"]
+host_safe = true
+external = []
+
+[modules.batching]
+depends = ["core", "datasets", "kernels"]
+host_safe = false
+external = []
+
+[modules.checkpoints]
+depends = ["core", "kernels", "optimizers", "artifacts"]
+host_safe = false
+external = []
+
+[modules.evaluation]
+depends = ["core", "kernels", "models", "objectives", "datasets", "batching"]
+host_safe = false
+external = []
+
+[modules.engine]
+depends = ["core", "kernels", "models", "optimizers", "objectives", "datasets", "batching", "artifacts", "checkpoints", "evaluation"]
+host_safe = false
+external = []
+
+[modules.strategies]
+depends = ["core", "kernels", "layers", "models", "optimizers", "objectives", "datasets", "batching", "artifacts", "checkpoints", "evaluation", "engine"]
+host_safe = false
+external = []
+
+[modules.execution]
+depends = ["core", "artifacts", "datasets"]
+host_safe = true
+external = []
+
+[modules.supervisor]
+depends = ["core", "artifacts", "execution"]
+host_safe = true
+external = []
