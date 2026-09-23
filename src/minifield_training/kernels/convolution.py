@@ -1,4 +1,8 @@
-"""Gated depthwise convolution kernel used by LFM2 convolution blocks."""
+"""Gated depthwise convolution kernel.
+
+So far only used by LFM2 convolution blocks but might be used in
+future for other Mamba based models.
+"""
 
 import jax
 import jax.numpy as jnp
