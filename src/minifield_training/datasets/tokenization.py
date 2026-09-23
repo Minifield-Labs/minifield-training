@@ -1,8 +1,10 @@
 """Verified token supervision using caller-supplied chat templates."""
 
+from collections.abc import Callable, Iterator
+from copy import deepcopy
 from dataclasses import dataclass
 import json
-from typing import Protocol
+from typing import Protocol, cast
 
 from minifield_training.datasets.preparation import Example
 
@@ -17,8 +19,8 @@ class ChatTokenizer(Protocol):
         tokenize: bool,
         add_generation_prompt: bool,
         tools: list[dict[str, object]] | None = None,
-    ) -> list[int]:
-        """Render complete messages to integer token IDs."""
+    ) -> str | list[int]:
+        """Render messages as text or integer token IDs."""
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,101 @@ def _messages(example: Example) -> list[dict[str, object]]:
     return result
 
 
+def _probes(value: object) -> Iterator[object]:
+    """Change one JSON leaf at a time for tool-semantic admission."""
+    if isinstance(value, dict):
+        if not value:
+            yield {"__audit_probe__": "value"}
+        for key, child in value.items():
+            for changed in _probes(child):
+                variant = dict(value)
+                variant[key] = changed
+                yield variant
+    elif isinstance(value, list):
+        if not value:
+            yield ["__audit_probe__"]
+        for index, child in enumerate(value):
+            for changed in _probes(child):
+                list_variant = list(value)
+                list_variant[index] = changed
+                yield list_variant
+    elif isinstance(value, str):
+        yield value + "__audit_probe__"
+    elif isinstance(value, bool):
+        yield not value
+    elif isinstance(value, int | float):
+        yield value + 1
+    else:
+        yield "__audit_probe__"
+
+
+type _Encoder = Callable[
+    [list[dict[str, object]], list[dict[str, object]] | None], tuple[int, ...]
+]
+type _Renderer = Callable[
+    [list[dict[str, object]], list[dict[str, object]] | None], str
+]
+
+
+def _audit_tools(
+    messages: list[dict[str, object]],
+    tools: list[dict[str, object]] | None,
+    *,
+    encode: _Encoder,
+    render: _Renderer,
+    full_ids: tuple[int, ...],
+    full_text: str,
+) -> None:
+    """Require each supported tool component to affect text and token IDs."""
+
+    def check(
+        candidate: list[dict[str, object]],
+        definitions: list[dict[str, object]] | None,
+    ) -> None:
+        """Reject any component that disappears in text or tokenization."""
+        if (
+            render(candidate, definitions) == full_text
+            or encode(candidate, definitions) == full_ids
+        ):
+            raise ValueError("template ignored a tool component")
+
+    if tools is not None:
+        for index, definition in enumerate(tools):
+            for changed in _probes(definition):
+                variant_tools = deepcopy(tools)
+                variant_tools[index] = cast(dict[str, object], changed)
+                check(messages, variant_tools)
+    for message_index, message in enumerate(messages):
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            for call_index, call in enumerate(calls):
+                for path in ("id", "name", "arguments"):
+                    function = call["function"]
+                    original = call["id"] if path == "id" else function[path]
+                    for changed in _probes(original):
+                        variant_messages = deepcopy(messages)
+                        variant_calls = cast(
+                            list[dict[str, object]],
+                            variant_messages[message_index]["tool_calls"],
+                        )
+                        variant_call = variant_calls[call_index]
+                        if path == "id":
+                            variant_call["id"] = changed
+                        else:
+                            function_fields = cast(
+                                dict[str, object], variant_call["function"]
+                            )
+                            function_fields[path] = changed
+                        check(variant_messages, tools)
+        reply_id = message.get("tool_call_id")
+        if isinstance(reply_id, str):
+            variant_messages = deepcopy(messages)
+            variant_messages[message_index]["tool_call_id"] = (
+                reply_id + "__audit_probe__"
+            )
+            check(variant_messages, tools)
+
+
 def tokenize_example(
     example: Example,
     tokenizer: ChatTokenizer,
@@ -68,6 +165,7 @@ def tokenize_example(
     template_id: str,
     max_tokens: int,
     overlength: str = "error",
+    audited_tool_template: bool = False,
 ) -> TokenizedExample | None:
     """Encode once and verify every selected span against complete prefixes.
 
@@ -103,22 +201,39 @@ def tokenize_example(
         return tuple(result)
 
     full = encode(messages)
-    if tools is not None and encode(messages, None) == full:
-        raise ValueError("template ignored supplied tool definitions")
-    if any(
+    has_tool_data = tools is not None or any(
         message.tool_calls or message.tool_call_id
         for message in example.messages
-    ):
-        stripped = [
-            {
-                key: value
-                for key, value in message.items()
-                if key not in {"tool_calls", "tool_call_id"}
-            }
-            for message in messages
-        ]
-        if encode(stripped) == full:
-            raise ValueError("template ignored tool calls or reply identities")
+    )
+    if has_tool_data:
+        if not audited_tool_template:
+            raise ValueError("tool template needs an explicit audit")
+
+        def render(
+            selected: list[dict[str, object]],
+            supplied_tools: list[dict[str, object]] | None,
+        ) -> str:
+            """Inspect the actual template text for semantic differences."""
+            result = tokenizer.apply_chat_template(
+                selected,
+                tokenize=False,
+                add_generation_prompt=False,
+                tools=supplied_tools,
+            )
+            if not isinstance(result, str):
+                raise ValueError(
+                    "chat template must render text for tool audit"
+                )
+            return result
+
+        _audit_tools(
+            messages,
+            tools,
+            encode=encode,
+            render=render,
+            full_ids=full,
+            full_text=render(messages, tools),
+        )
     if len(full) > max_tokens:
         if overlength == "drop":
             return None
