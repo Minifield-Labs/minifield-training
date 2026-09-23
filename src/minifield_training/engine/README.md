@@ -1,10 +1,31 @@
-# Shared training lifecycle
+# Shared logical update
 
-Initialization, forward/backward execution, evaluation cadence, update boundaries, checkpoint scheduling, progress, and interruption handling for supported execution plans. Consume public model and objective contracts. Strategies provide composition and policy; they must not grow parallel copies of this lifecycle. Introduce abstractions only after concrete consumers establish their required behavior.
+`step.make_step(loss_terms, inventory, adamw_config)` builds one pure update.
+The callback receives the full FP32 parameter dictionary and one physical batch,
+then returns scalar FP32 **summed** loss and supervised-target count. The engine
+differentiates only `inventory.trainable_names`, scans active microbatches,
+divides loss and gradients once by the total target count, and calls the shared
+AdamW transaction once. Frozen masters and moments pass through unchanged.
 
-Status: reserved. No implementation yet. Add a docstring-only `__init__.py`
-with the first real module; this directory currently contributes no executable
-behavior.
+```python
+from minifield_training.engine import step
+
+update = step.make_step(loss_terms, inventory, adamw_config)
+result = update(optimizer_state, microbatches, active)
+```
+
+Every `microbatches` value has shape `[M, ...]` with the same fixed `M`; `active`
+is a boolean `[M]` vector. The callback defines the remaining physical-batch
+shape. Inactive slots skip the callback and contribute finite zeros. Active
+nonfinite loss or gradient, negative/nonfinite count, or zero total count rejects
+the entire update. `result.code` and `result.committed` are AdamW diagnostics;
+rejection returns the exact healthy incoming state. Malformed trees, scalar
+contracts, and leading dimensions raise `ValueError` at tracing time.
+
+The update is compatible with `jax.jit`. FP32 masters, moments, accumulated
+loss, gradients and count are retained. CPU synthetic tests cover token-weighted
+equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
+agreement. CUDA and mixed-device performance remain unqualified. Host loops,
+checkpoints, scheduling and packed-batch construction aren't part of this module.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
-Document each added public contract, consumer, example, and test here.
