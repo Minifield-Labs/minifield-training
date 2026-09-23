@@ -27,7 +27,8 @@ uv pip install 'minifield-training[numerical]'
 ```
 
 `kernels`, `layers`, `models`, `objectives` and `optimizers` require that
-extra. For offline chat-template tokenization, install the pinned `text` extra:
+extra. For offline chat-template tokenization, install the pinned `text`
+extra:
 
 ```sh
 uv pip install 'minifield-training[text]'

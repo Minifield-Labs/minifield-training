@@ -1,5 +1,6 @@
 """Offline chat-template and exact supervision checks."""
 
+import json
 from pathlib import Path
 from typing import cast
 
@@ -14,6 +15,7 @@ import tokenizers.pre_tokenizers as pre_tokenizers  # type: ignore[import-untype
 from transformers import PreTrainedTokenizerFast
 
 from minifield_training.batching.sft import iter_updates
+from minifield_training.core.json_io import canonical
 from minifield_training.core.json_io import digest_file
 from minifield_training.datasets.conversations import parse_conversation
 from minifield_training.datasets.conversations import read_jsonl
@@ -311,6 +313,17 @@ def test_context_dependent_token_prefix_rejected() -> None:
         )
 
 
+def _tokenizer_snapshot(tokenizer: PreTrainedTokenizerFast) -> str:
+    """Capture backend bytes and live special-token assignments."""
+    return canonical(
+        {
+            "backend": json.loads(tokenizer.backend_tokenizer.to_str()),
+            "special_tokens_map": tokenizer.special_tokens_map,
+            "split_special_tokens": tokenizer.split_special_tokens,
+        }
+    )
+
+
 def test_full_jsonl_to_replayed_sft_update(tmp_path: Path) -> None:
     """A bounded offline record lowers tiny-model loss after artifact replay."""
     source = tmp_path / "source.jsonl"
@@ -323,19 +336,20 @@ def test_full_jsonl_to_replayed_sft_update(tmp_path: Path) -> None:
     tokenizer = cast(PreTrainedTokenizerFast, local_tokenizer())
     tokenizer_asset = tmp_path / "tokenizer.json"
     template_asset = tmp_path / "template.jinja"
-    tokenizer_asset.write_text(
-        tokenizer.backend_tokenizer.to_str(), encoding="utf-8"
-    )
+    tokenizer_asset.write_text(_tokenizer_snapshot(tokenizer), encoding="utf-8")
     assert isinstance(tokenizer.chat_template, str)
     template_asset.write_text(tokenizer.chat_template, encoding="utf-8")
     settings = PreparationSettings("all", "seed", 0.0, 16, "error")
+    source_examples = list(
+        prepare(
+            read_jsonl(source),
+            mode=settings.mode,
+            seed=settings.seed,
+            validation_fraction=settings.validation_fraction,
+        )
+    )
     examples = []
-    for example in prepare(
-        read_jsonl(source),
-        mode=settings.mode,
-        seed=settings.seed,
-        validation_fraction=settings.validation_fraction,
-    ):
+    for example in source_examples:
         encoded = tokenize_example(
             example,
             cast(ChatTokenizer, tokenizer),
@@ -425,3 +439,31 @@ def test_full_jsonl_to_replayed_sft_update(tmp_path: Path) -> None:
         assert bool(result.committed)
         current = result.state
     assert measured_loss() < before - 0.05
+
+    old_backend = tokenizer.backend_tokenizer.to_str()
+    old_template = tokenizer.chat_template
+    old_digest = digest_file(tokenizer_asset)
+    tokenizer.bos_token = "[UNK]"
+    assert tokenizer.backend_tokenizer.to_str() == old_backend
+    assert tokenizer.chat_template == old_template
+    changed = tokenize_example(
+        source_examples[0],
+        cast(ChatTokenizer, tokenizer),
+        tokenizer_id="changed",
+        template_id=digest_file(template_asset),
+        max_tokens=settings.max_tokens,
+    )
+    assert changed is not None
+    assert changed.input_ids != examples[0].input_ids
+    tokenizer_asset.write_text(_tokenizer_snapshot(tokenizer), encoding="utf-8")
+    assert digest_file(tokenizer_asset) != old_digest
+    with pytest.raises(ValueError, match="stale"):
+        list(
+            iter_prepared(
+                artifact,
+                source=source,
+                tokenizer_asset=tokenizer_asset,
+                template_asset=template_asset,
+                settings=settings,
+            )
+        )

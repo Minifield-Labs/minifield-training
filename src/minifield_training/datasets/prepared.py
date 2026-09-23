@@ -89,7 +89,12 @@ def _validate(
             not isinstance(item, int) or isinstance(item, bool) or item < 0
             for item in ids
         )
-        or any(item not in (0, 1) or isinstance(item, bool) for item in mask)
+        or any(
+            not isinstance(item, int)
+            or isinstance(item, bool)
+            or item not in (0, 1)
+            for item in mask
+        )
         or mask[0] != 0
         or not any(mask[1:])
     ):
@@ -216,8 +221,9 @@ def iter_prepared(
         not isinstance(manifest, dict)
         or set(manifest)
         != {"version", "count", "checksum", "payload", "identity"}
-        or manifest["version"] != _VERSION
+        or not isinstance(manifest["version"], int)
         or isinstance(manifest["version"], bool)
+        or manifest["version"] != _VERSION
         or manifest["identity"] != identity
         or not isinstance(manifest["checksum"], str)
         or re.fullmatch(r"[0-9a-f]{64}", manifest["checksum"]) is None

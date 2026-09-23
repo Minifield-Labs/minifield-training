@@ -59,7 +59,10 @@ IDs, source-group split assignments, lengths, and masks before yielding rows.
 Use absolute, symlink-free local paths. Store artifacts outside Git. Asset
 identity is a byte digest; labels alone don't authorize cache reuse. Callers
 must serialize the exact tokenizer and template used for tokenization into the
-supplied files and use their digests as `tokenizer_id` and `template_id`.
+supplied files and use their digests as `tokenizer_id` and `template_id`. For
+Hugging Face fast tokenizers, the offline fixture captures backend tokenizer
+JSON, live `special_tokens_map`, and `split_special_tokens` in canonical JSON.
+Capture any further tokenizer configuration that the chosen template reads.
 No remote artifact registry or in-place mutation protection is included.
 
 The bounded synthetic acceptance path is executable with

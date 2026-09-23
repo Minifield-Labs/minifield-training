@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -168,6 +169,46 @@ def test_wrong_settings_and_unsafe_paths(tmp_path: Path) -> None:
         list(
             iter_prepared(
                 alias,
+                source=source,
+                tokenizer_asset=tokenizer,
+                template_asset=template,
+                settings=settings,
+            )
+        )
+
+
+def test_float_manifest_version_and_mask_are_rejected(tmp_path: Path) -> None:
+    """JSON numeric equality can't admit a float schema version or mask."""
+    source, tokenizer, template, settings = _inputs(tmp_path)
+    artifact = tmp_path / "prepared"
+    expected = _example(tokenizer, template)
+    bad_mask = replace(
+        expected, loss_mask=cast(tuple[int, ...], (0.0, 1.0, 1.0))
+    )
+    with pytest.raises(ValueError, match="invalid prepared example"):
+        save_prepared(
+            artifact,
+            [bad_mask],
+            source=source,
+            tokenizer_asset=tokenizer,
+            template_asset=template,
+            settings=settings,
+        )
+    manifest_path = save_prepared(
+        artifact,
+        [expected],
+        source=source,
+        tokenizer_asset=tokenizer,
+        template_asset=template,
+        settings=settings,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = 1.0
+    manifest_path.write_text(canonical(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid prepared manifest"):
+        list(
+            iter_prepared(
+                artifact,
                 source=source,
                 tokenizer_asset=tokenizer,
                 template_asset=template,
