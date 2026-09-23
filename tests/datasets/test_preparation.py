@@ -55,3 +55,46 @@ def test_duplicate_visible_content_across_groups_rejected() -> None:
     second = _record("r2", "g2", "Two")
     with pytest.raises(ValueError, match="duplicate visible content"):
         list(prepare([first, second], mode="turn", seed="fixed"))
+
+
+def test_shared_turn_prefix_across_splits_rejected() -> None:
+    """A shared first turn can't train in one split and validate in another."""
+    assert (
+        assign_split("g1", seed="fixed", validation_fraction=0.5)
+        == "validation"
+    )
+    assert assign_split("g2", seed="fixed", validation_fraction=0.5) == "train"
+    first = _record("r1", "g1", "Two")
+    second = _record("r2", "g2", "Different")
+    with pytest.raises(ValueError, match="duplicate visible content"):
+        list(
+            prepare(
+                [first, second],
+                mode="turn",
+                seed="fixed",
+                validation_fraction=0.5,
+            )
+        )
+    assert (
+        len(
+            list(
+                prepare(
+                    [first, second],
+                    mode="all",
+                    seed="fixed",
+                    validation_fraction=0.5,
+                )
+            )
+        )
+        == 2
+    )
+
+
+def test_shared_turn_prefix_within_one_group_is_allowed() -> None:
+    """A group can contain related conversations with identical early turns."""
+    first = _record("r1", "g1", "Two")
+    second = _record("r2", "g1", "Different")
+    examples = list(prepare([first, second], mode="turn", seed="fixed"))
+    assert len(examples) == 4
+    assert examples[0].messages == examples[2].messages
+    assert len({item.split for item in examples}) == 1
