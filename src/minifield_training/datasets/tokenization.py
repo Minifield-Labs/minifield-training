@@ -85,7 +85,7 @@ def _probes(value: object) -> Iterator[object]:
     elif isinstance(value, bool):
         yield not value
     elif isinstance(value, int | float):
-        yield value + 1
+        yield 0 if value != 0 else 1
     else:
         yield "__audit_probe__"
 
@@ -167,7 +167,7 @@ def tokenize_example(
     overlength: str = "error",
     audited_tool_template: bool = False,
 ) -> TokenizedExample | None:
-    """Encode once and verify every selected span against complete prefixes.
+    """Encode the full example and verify spans with prefix re-encodings.
 
     A template that changes earlier tokens when later messages are added is
     unsupported. The adapter selects complete assistant messages, including
