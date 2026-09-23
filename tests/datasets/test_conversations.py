@@ -64,3 +64,80 @@ def test_bad_lines_are_rejected_without_payload(
     with pytest.raises(ValueError, match="bad.jsonl:1") as error:
         list(read_jsonl(path))
     assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "interrupt",
+    [
+        {"role": "assistant", "content": "result"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "later", "name": "find", "arguments": {}}],
+        },
+        {"role": "user", "content": "next"},
+    ],
+)
+def test_outstanding_call_blocks_non_tool_message(
+    tmp_path: Path, interrupt: dict[str, object]
+) -> None:
+    """Assistant and user turns must wait until all tool replies arrive."""
+    path = tmp_path / "order.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "r",
+                "source_group": "g",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "c", "name": "find", "arguments": {}}
+                        ],
+                    },
+                    interrupt,
+                    {"role": "tool", "content": "hit", "tool_call_id": "c"},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unresolved tool call"):
+        list(read_jsonl(path))
+
+
+def test_parallel_tool_replies_can_arrive_in_either_order(
+    tmp_path: Path,
+) -> None:
+    """Every outstanding call resolves before assistant continuation."""
+    path = tmp_path / "parallel.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "r",
+                "source_group": "g",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "a", "name": "find", "arguments": {}},
+                            {"id": "b", "name": "find", "arguments": {}},
+                        ],
+                    },
+                    {"role": "tool", "content": "two", "tool_call_id": "b"},
+                    {"role": "tool", "content": "one", "tool_call_id": "a"},
+                    {"role": "assistant", "content": "done"},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    records = list(read_jsonl(path))
+    assert [item.tool_call_id for item in records[0].messages[1:3]] == [
+        "b",
+        "a",
+    ]
