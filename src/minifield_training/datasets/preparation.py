@@ -21,7 +21,7 @@ class Example:
     targets: tuple[int, ...]
 
 
-def _visible(record: Conversation) -> str:
+def _visible(messages: tuple[Message, ...], tools: tuple[str, ...]) -> str:
     """Canonical identity of content that the model may see."""
     return canonical(
         {
@@ -39,9 +39,9 @@ def _visible(record: Conversation) -> str:
                         for call in message.tool_calls
                     ],
                 }
-                for message in record.messages
+                for message in messages
             ],
-            "tools": record.tools,
+            "tools": tools,
         }
     )
 
@@ -87,10 +87,6 @@ def prepare(
         if record.id in ids:
             raise ValueError("duplicate record id")
         ids.add(record.id)
-        visible = sha256(_visible(record).encode()).hexdigest()
-        owner = seen.setdefault(visible, record.source_group)
-        if owner != record.source_group:
-            raise ValueError("duplicate visible content across source groups")
         split = assign_split(
             record.source_group,
             seed=seed,
@@ -101,8 +97,9 @@ def prepare(
             for index, item in enumerate(record.messages)
             if item.role == "assistant"
         )
+        examples: tuple[Example, ...]
         if mode == "all":
-            yield Example(
+            example = Example(
                 record.id,
                 record.source_group,
                 split,
@@ -110,9 +107,10 @@ def prepare(
                 record.tools,
                 targets,
             )
+            examples = (example,)
         else:
-            for index in targets:
-                yield Example(
+            examples = tuple(
+                Example(
                     f"{record.id}:turn:{index}",
                     record.source_group,
                     split,
@@ -120,3 +118,15 @@ def prepare(
                     record.tools,
                     (index,),
                 )
+                for index in targets
+            )
+        for example in examples:
+            visible = sha256(
+                _visible(example.messages, example.tools).encode()
+            ).hexdigest()
+            owner = seen.setdefault(visible, example.source_group)
+            if owner != example.source_group:
+                raise ValueError(
+                    "duplicate visible content across source groups"
+                )
+            yield example
