@@ -1,10 +1,14 @@
-# Batch construction and iteration
+# Dense SFT batch construction
 
-Packing, sequence masks, microbatch construction, iteration, and conversion into device-ready inputs. Record order, segment boundaries, padding, positions, and loss masks must agree with the dataset contract. Reuse one implementation where SFT and calibration share semantics, while keeping their differing sampling policies explicit and independently tested.
+`iter_updates` takes validated `TokenizedExample` values and explicit
+`microbatches`, `rows_per_microbatch`, `sequence_length`, `pad_token_id`,
+`vocab_size`, and `seed`. It shuffles deterministically, emits one real example
+per row, and pads partial updates with finite inert rows. The returned arrays
+have shape `[M, B, T]` and match `engine.step.make_step`'s keys and boolean
+`active[M]` vector. `start_update` resumes at a complete update boundary in
+the same seeded order. The real `example_ids` are returned for audit.
 
-Status: reserved. No implementation yet. Add a docstring-only `__init__.py`
-with the first real module; this directory currently contributes no executable
-behavior.
-
-The executable dependency policy is [architecture.toml](../../../architecture.toml).
-Document each added public contract, consumer, example, and test here.
+No sequence packing is implemented. The current dense causal objective doesn't
+carry segment boundaries; concatenating examples into one row would allow
+cross-example attention and corrupt supervision. Use a segment-aware forward
+and objective before adding packing.
