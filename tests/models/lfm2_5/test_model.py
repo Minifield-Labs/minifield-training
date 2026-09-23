@@ -115,3 +115,56 @@ def test_masters_reject_nonfinite_leaves() -> None:
     model.validate_parameters(params, cfg)
     with pytest.raises(ValueError, match="non-finite"):
         model.validate_masters(params, cfg)
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float16, jnp.bfloat16])
+def test_logits_selects_head_and_preserves_projection_precision(
+    tied: bool, dtype: type[np.generic]
+) -> None:
+    """The adapter selects the stored head and returns FP32 projected logits."""
+    cfg = model.Config(
+        hidden_size=2,
+        intermediate_size=2,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        vocab_size=2,
+        layer_types=("full_attention",),
+        tied_embeddings=tied,
+    )
+    hidden = jnp.array([[[2.0, -4.0]]], dtype=dtype)
+    parameters = {
+        "model.embed_tokens.weight": jnp.array([[0.5, -0.25], [0.25, 0.5]]),
+        "lm_head.weight": jnp.array([[1.0, 0.5], [-0.5, 0.25]]),
+    }
+    result = model.logits(hidden, parameters, cfg)
+    np.testing.assert_array_equal(
+        result, [[[2.0, -1.5]]] if tied else [[[0.0, -2.0]]]
+    )
+    assert result.dtype == jnp.float32
+
+
+def test_inventory_declares_family_decay_policy() -> None:
+    """Tied embedding and unfrozen matrices decay; norm and conv taps don't."""
+    frozen = frozenset({"model.layers.0.conv.in_proj.weight"})
+    inventory = model.parameter_inventory(_config(), frozen_names=frozen)
+    expected = {
+        "model.embed_tokens.weight",
+        "model.layers.0.conv.out_proj.weight",
+        "model.layers.0.feed_forward.w1.weight",
+        "model.layers.0.feed_forward.w2.weight",
+        "model.layers.0.feed_forward.w3.weight",
+        "model.layers.1.feed_forward.w1.weight",
+        "model.layers.1.feed_forward.w2.weight",
+        "model.layers.1.feed_forward.w3.weight",
+        "model.layers.1.self_attn.q_proj.weight",
+        "model.layers.1.self_attn.k_proj.weight",
+        "model.layers.1.self_attn.v_proj.weight",
+        "model.layers.1.self_attn.out_proj.weight",
+    }
+    assert {spec.name for spec in inventory.specs if spec.decayed} == expected
+    assert frozenset(inventory.frozen_names) == frozen
+    assert "lm_head.weight" not in inventory.names
+    assert inventory.sha256 == (
+        "385ed95f6c8b547cdefe500b3d7d6d14f7545a7c3d6f4a6d9e7c2199ec6e8155"
+    )

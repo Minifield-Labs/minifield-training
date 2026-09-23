@@ -22,6 +22,7 @@ def _inventory() -> core_parameters.FullParameterInventory:
             "w.frozen_vector": (4,),
         },
         format_id="test.inventory/1",
+        decayed_names=frozenset({"w.matrix"}),
         frozen_names=frozenset({"w.frozen_matrix", "w.frozen_vector"}),
     )
 
@@ -345,6 +346,50 @@ def test_zero_gradient_commits_with_decay_only() -> None:
         np.asarray(result.state["params"]["w.vector"]),
         np.asarray(full_state["params"]["w.vector"]),
     )
+
+
+@pytest.mark.parametrize("decayed_name", ["projection", "scale"])
+def test_decay_uses_explicit_membership(decayed_name: str) -> None:
+    """Decay the selected matrix or vector while preserving excluded leaves."""
+    params = {
+        "embedding": jnp.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32),
+        "projection": jnp.asarray(
+            [[0.5, -0.5], [1.0, -1.0]], dtype=jnp.float32
+        ),
+        "scale": jnp.asarray([2.0, 3.0], dtype=jnp.float32),
+        "stored": jnp.asarray([[4.0, 5.0]], dtype=jnp.float32),
+    }
+    inventory = core_parameters.build_inventory(
+        {name: tuple(value.shape) for name, value in params.items()},
+        format_id="test.inventory/1",
+        decayed_names=frozenset({decayed_name}),
+        frozen_names=frozenset({"stored"}),
+    )
+    full_state = adamw.initialize_state(params, inventory)
+    config = adamw.AdamWConfig(learning_rate=0.1, weight_decay=0.5)
+    transition = adamw.make_transaction(inventory, config)
+    result = transition(
+        full_state,
+        {
+            name: jnp.zeros_like(params[name])
+            for name in inventory.trainable_names
+        },
+        jnp.float32(1.0),
+        jnp.asarray(True),
+    )
+    assert bool(result.committed)
+    assert int(result.state["step"]) == 1
+    for name, value in params.items():
+        expected = np.asarray(value, dtype=np.float64)
+        if name == decayed_name:
+            expected = expected * 0.95
+        np.testing.assert_allclose(
+            np.asarray(result.state["params"][name]), expected, rtol=1e-6
+        )
+        for group in ("m", "v"):
+            np.testing.assert_array_equal(
+                np.asarray(result.state[group][name]), np.zeros(value.shape)
+            )
 
 
 def test_gradient_tree_covers_exactly_trainable_leaves() -> None:

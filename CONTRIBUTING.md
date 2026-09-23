@@ -21,7 +21,10 @@ uv run --no-sync python scripts/check_quality.py
 
 The complete gate checks lock consistency, structure, formatting, lint, strict
 types, tests, source/wheel builds, installed file completeness, and clean-process
-host imports from an independent wheel environment. Build dependency downloads
+host imports from an independent wheel environment. Run it from a Git checkout:
+the package check rejects Git-ignored files included in the source archive.
+Keep local archives and scratch code outside source, test and documentation
+trees, which are scanned by the checks and source manifest. Build downloads
 may need network access on the first run. CUDA qualification is a separate
 explicit task.
 
@@ -48,7 +51,7 @@ The pre-commit hook checks current worktree structure. It doesn't inspect the
 Git index in isolation, so review partially staged changes carefully. The full
 quality command and CI validate the complete checked-out tree.
 
-Local hooks can be bypassed. When the repository gets a remote, require the
+Local hooks can be bypassed. Configure GitHub branch protection to require the
 `CPU quality and package` CI job and review for changes to architecture,
-duplication policy and quality scripts. Repository files cannot enable
-server-side protection before a remote exists.
+duplication policy and quality scripts. Repository files don't enforce
+server-side protection.

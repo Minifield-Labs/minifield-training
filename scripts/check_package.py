@@ -4,6 +4,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 
@@ -46,6 +47,43 @@ def _host_modules() -> list[str]:
     return result
 
 
+def check_source_archive(root: pathlib.Path, archive: pathlib.Path) -> None:
+    """Reject Git-ignored checkout files selected by the source manifest.
+
+    Setuptools generates egg-info metadata itself. All other archive files
+    must be eligible for version control in the checkout running this gate.
+    Untracked, nonignored files are allowed during local development.
+    """
+    with tarfile.open(archive, "r:gz") as source:
+        paths = [
+            pathlib.PurePosixPath(member.name)
+            .relative_to(pathlib.PurePosixPath(member.name).parts[0])
+            .as_posix()
+            for member in source.getmembers()
+            if member.isfile()
+        ]
+    paths = [
+        path
+        for path in paths
+        if not path.startswith("src/minifield_training.egg-info/")
+    ]
+    result = subprocess.run(
+        ["git", "check-ignore", "--stdin", "-z"],
+        cwd=root,
+        input="\0".join(paths) + "\0",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"Cannot check source archive: {result.stderr}")
+    ignored = sorted(filter(None, result.stdout.split("\0")))
+    if ignored:
+        raise RuntimeError(
+            "Source archive contains Git-ignored files: " + ", ".join(ignored)
+        )
+
+
 def main() -> None:
     """Install the built wheel in a fresh environment and probe it with -I."""
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
@@ -70,8 +108,10 @@ def main() -> None:
             check=True,
         )
         wheels = list(output.glob("*.whl"))
-        if len(wheels) != 1 or len(list(output.glob("*.tar.gz"))) != 1:
+        archives = list(output.glob("*.tar.gz"))
+        if len(wheels) != 1 or len(archives) != 1:
             raise RuntimeError("Expected exactly one wheel and source archive")
+        check_source_archive(ROOT, archives[0])
         environment = temporary / "environment"
         subprocess.run(
             ["uv", "venv", str(environment), "--python", sys.executable],

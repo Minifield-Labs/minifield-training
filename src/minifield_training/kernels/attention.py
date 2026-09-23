@@ -1,4 +1,4 @@
-"""Causal attention kernels for dense and compact LFM2 batches."""
+"""Causal attention for padded, packed, shared-prefix and cached inputs."""
 
 from collections.abc import Callable
 from typing import Literal
