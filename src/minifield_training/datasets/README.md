@@ -28,3 +28,18 @@ context and no later messages. Both preserve tool definitions. The returned
 spans. Exact duplicate model-visible conversations from different groups fail
 closed. Holdout assignment is stable under input reordering. The default
 validation fraction is 0.1; callers can set it explicitly.
+
+## Template tokenization
+
+`tokenize_example` accepts a caller-supplied tokenizer implementing
+`apply_chat_template`, plus explicit tokenizer and template identity strings.
+A pinned Hugging Face tokenizer can be supplied through the optional `text`
+extra. Training examples use `tokenize=True` and
+`add_generation_prompt=False`. The adapter masks complete selected assistant
+messages, including template control and end tokens. It verifies each prefix
+against the full token sequence and rejects templates whose tokenization
+changes earlier tokens when another message is appended. Tool definitions and
+call fields must affect the rendered IDs; ignored tool inputs fail closed.
+Callers must pin and audit a template's role, tool, and end-marker behavior.
+Examples exceeding `max_tokens` either raise or return `None` with
+`overlength="drop"`; no sequence is cut.
