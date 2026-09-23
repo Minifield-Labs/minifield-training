@@ -1,6 +1,7 @@
 """Causal attention kernels for dense and compact LFM2 batches."""
 
 from collections.abc import Callable
+from typing import Literal
 
 import jax
 from jax.experimental.pallas.ops.tpu import splash_attention
@@ -144,6 +145,7 @@ def _splash_mha(
     make_mask: Callable[[int, int], "splash_attention.Mask"],
     query_segment_ids: jax.Array | None,
     key_segment_ids: jax.Array | None,
+    interpret: bool,
 ) -> jax.Array:
     """Run a single-device Splash kernel over batched ``bthd`` operands.
 
@@ -162,7 +164,9 @@ def _splash_mha(
     kv_padded = _round_up(key.shape[1], blocks.block_kv)
     mask = make_mask(q_padded, kv_padded)
     multi_head = splash_attention.MultiHeadMask([mask] * query.shape[2])
-    kernel = splash_attention.make_splash_mha_single_device(multi_head)
+    kernel = splash_attention.make_splash_mha_single_device(
+        multi_head, interpret=interpret
+    )
     query = jnp.transpose(
         _pad_to(query * (query.shape[-1] ** -0.5), q_padded, 1),
         (0, 2, 1, 3),
@@ -283,13 +287,16 @@ def cudnn_causal_attention(
     key: jax.Array,
     value: jax.Array,
     attention_mask: jax.Array,
+    *,
+    implementation: Literal["cudnn", "xla"] = "cudnn",
 ) -> jax.Array:
     """Apply fused cuDNN causal attention to prefix-padded sequences.
 
     Active counts are summed from ``attention_mask`` and passed as sequence
     lengths, so each row's valid tokens must form a contiguous prefix.
     Causality comes from ``is_causal``, keeping the fused kernel without a
-    materialized score mask.
+    materialized score mask. ``implementation`` selects the
+    ``jax.nn.dot_product_attention`` backend; ``xla`` runs without cuDNN.
     """
     lengths = jnp.sum(attention_mask, axis=1, dtype=jnp.int32)
     return jax.nn.dot_product_attention(
@@ -299,7 +306,7 @@ def cudnn_causal_attention(
         is_causal=True,
         query_seq_lengths=lengths,
         key_value_seq_lengths=lengths,
-        implementation="cudnn",
+        implementation=implementation,
     )
 
 
@@ -311,16 +318,20 @@ def cudnn_prefix_causal_attention(
     value: jax.Array,
     prefix_mask: jax.Array,
     suffix_mask: jax.Array,
+    *,
+    implementation: Literal["cudnn", "xla"] = "cudnn",
 ) -> jax.Array:
     """Attend suffix queries to a shared prefix and their own causal suffix.
 
     cuDNN accepts this offset-causal mask without materializing the full
-    query-head by query-token by key-token score grid.
+    query-head by query-token by key-token score grid. ``implementation``
+    selects the ``jax.nn.dot_product_attention`` backend; ``xla`` runs
+    without cuDNN.
     """
     key, value = _prefix_key_value(query, prefix_key, prefix_value, key, value)
     valid = _prefix_valid_mask(query, prefix_key, prefix_mask, suffix_mask)
     return jax.nn.dot_product_attention(
-        query, key, value, mask=valid, implementation="cudnn"
+        query, key, value, mask=valid, implementation=implementation
     )
 
 
@@ -330,11 +341,14 @@ def cudnn_packed_causal_attention(
     value: jax.Array,
     attention_mask: jax.Array,
     segment_ids: jax.Array,
+    *,
+    implementation: Literal["cudnn", "xla"] = "cudnn",
 ) -> jax.Array:
     """Apply causal attention confined to same-segment active tokens.
 
     Inactive query outputs are zeroed so padding never leaks into supervised
-    paths.
+    paths. ``implementation`` selects the ``jax.nn.dot_product_attention``
+    backend; ``xla`` runs without cuDNN.
     """
     valid, active = _packed_valid_mask(
         query, key, value, attention_mask, segment_ids
@@ -344,7 +358,7 @@ def cudnn_packed_causal_attention(
         key,
         value,
         mask=valid[:, None, :, :],
-        implementation="cudnn",
+        implementation=implementation,
     )
     return output * active[:, :, None, None].astype(output.dtype)
 
@@ -354,12 +368,15 @@ def cudnn_cached_attention(
     key: jax.Array,
     value: jax.Array,
     valid_length: jax.Array,
+    *,
+    implementation: Literal["cudnn", "xla"] = "cudnn",
 ) -> jax.Array:
     """Attend one query to the valid prefix of a fixed-size KV cache.
 
     The query is intentionally non-causal: its cache index is already the
     current absolute position, so causal masking based on query index zero
-    would hide every key after slot zero.
+    would hide every key after slot zero. ``implementation`` selects the
+    ``jax.nn.dot_product_attention`` backend; ``xla`` runs without cuDNN.
     """
     if query.shape[-1] != key.shape[-1] or key.shape != value.shape:
         raise ValueError("Cached attention query/KV shapes are incompatible")
@@ -375,7 +392,7 @@ def cudnn_cached_attention(
         is_causal=False,
         query_seq_lengths=query_lengths,
         key_value_seq_lengths=key_lengths,
-        implementation="cudnn",
+        implementation=implementation,
     )
 
 
@@ -392,12 +409,15 @@ def splash_causal_attention(
     key: jax.Array,
     value: jax.Array,
     attention_mask: jax.Array,
+    *,
+    interpret: bool = False,
 ) -> jax.Array:
     """Apply Splash causal attention on TPU to prefix-padded sequences.
 
     Causality is a static ``CausalMask`` so fully masked blocks are skipped;
     padding folds into key-side segment ids, which give active keys one
-    shared segment and each inactive key a private one.
+    shared segment and each inactive key a private one. ``interpret`` runs
+    the kernel in Pallas interpret mode, the only supported path off TPU.
     """
     kv_ids = _padding_segment_ids(attention_mask > 0)
     query_ids = jnp.ones_like(kv_ids)
@@ -408,6 +428,7 @@ def splash_causal_attention(
         lambda q_len, kv_len: splash_attention.CausalMask((q_len, kv_len)),
         query_ids,
         kv_ids,
+        interpret,
     )
 
 
@@ -419,12 +440,15 @@ def splash_prefix_causal_attention(
     value: jax.Array,
     prefix_mask: jax.Array,
     suffix_mask: jax.Array,
+    *,
+    interpret: bool = False,
 ) -> jax.Array:
     """Attend suffix queries to a shared prefix and their own causal suffix.
 
     A positive ``CausalMask`` offset makes every prefix key visible to every
     query while suffix keys stay causal. Per-row prefix and suffix masks fold
-    into segment ids, keeping the kernel mask static.
+    into segment ids, keeping the kernel mask static. ``interpret`` runs the
+    kernel in Pallas interpret mode, the only supported path off TPU.
     """
     key, value = _prefix_key_value(query, prefix_key, prefix_value, key, value)
     prefix_length = key.shape[1] - query.shape[1]
@@ -440,6 +464,7 @@ def splash_prefix_causal_attention(
         ),
         query_ids,
         kv_ids,
+        interpret,
     )
 
 
@@ -449,12 +474,16 @@ def splash_packed_causal_attention(
     value: jax.Array,
     attention_mask: jax.Array,
     segment_ids: jax.Array,
+    *,
+    interpret: bool = False,
 ) -> jax.Array:
     """Apply causal attention confined to same-segment active tokens.
 
     Splash's ``segment_ids`` carry the packed layout directly: active tokens
     keep their real segment id and each inactive token gets a private id, so
-    no softmax row is empty. Inactive query outputs are zeroed.
+    no softmax row is empty. Inactive query outputs are zeroed. ``interpret``
+    runs the kernel in Pallas interpret mode, the only supported path off
+    TPU.
     """
     active = (attention_mask > 0) & (segment_ids != 0)
     ids = _packed_segment_ids(active, segment_ids)
@@ -465,29 +494,30 @@ def splash_packed_causal_attention(
         lambda q_len, kv_len: splash_attention.CausalMask((q_len, kv_len)),
         ids,
         ids,
+        interpret,
     )
     return output * active[:, :, None, None].astype(output.dtype)
 
 
-_CAUSAL_BACKENDS = {
+_CAUSAL_BACKENDS: dict[str, Callable[..., jax.Array]] = {
     "dense": dense_causal_attention,
     "cudnn": cudnn_causal_attention,
     "splash": splash_causal_attention,
 }
 
-_PREFIX_BACKENDS = {
+_PREFIX_BACKENDS: dict[str, Callable[..., jax.Array]] = {
     "dense": dense_prefix_causal_attention,
     "cudnn": cudnn_prefix_causal_attention,
     "splash": splash_prefix_causal_attention,
 }
 
-_PACKED_BACKENDS = {
+_PACKED_BACKENDS: dict[str, Callable[..., jax.Array]] = {
     "dense": dense_packed_causal_attention,
     "cudnn": cudnn_packed_causal_attention,
     "splash": splash_packed_causal_attention,
 }
 
-_CACHED_BACKENDS = {
+_CACHED_BACKENDS: dict[str, Callable[..., jax.Array]] = {
     "dense": dense_cached_attention,
     "cudnn": cudnn_cached_attention,
 }
