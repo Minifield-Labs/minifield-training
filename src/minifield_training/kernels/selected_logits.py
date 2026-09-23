@@ -3,6 +3,8 @@
 import jax
 import jax.numpy as jnp
 
+from minifield_training.kernels import linear
+
 
 def selected_hidden_log_probs(
     selected: jax.Array,
@@ -10,11 +12,7 @@ def selected_hidden_log_probs(
     target_ids: jax.Array,
 ) -> jax.Array:
     """Score pre-gathered hidden states through the trainable LM head."""
-    logits = jnp.matmul(
-        selected,
-        head.astype(selected.dtype).T,
-        precision=jax.lax.Precision.HIGHEST,
-    ).astype(jnp.float32)
+    logits = linear.full_linear(selected, head).astype(jnp.float32)
     log_probs = jax.nn.log_softmax(logits, axis=-1)
     return jnp.take_along_axis(log_probs, target_ids[:, None], axis=-1)[:, 0]
 

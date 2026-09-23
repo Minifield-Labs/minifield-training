@@ -6,9 +6,9 @@ array types in `kernels/types.py` and model execution contracts in
 `models/contracts.py`. A host inspecting an input or artifact must never
 initialize a numerical backend.
 
-Status: JSON/digest helpers and parameter metadata records are implemented;
-the rest of this module's planned surface remains unimplemented. The dependency
-policy is [architecture.toml](../../../architecture.toml).
+Status: JSON/digest helpers, parameter records and inventory construction are
+implemented; the rest of this module's planned surface remains unimplemented.
+The dependency policy is [architecture.toml](../../../architecture.toml).
 
 ## `minifield_training.core.json_io`
 
@@ -38,36 +38,37 @@ or expected-hash policy; those belong to callers.
 
 Tests: `uv run --no-sync pytest tests/core/test_json_io.py` with literal
 expected bytes in [test_json_io.py](../../../tests/core/test_json_io.py).
-The intended next consumers are neutral parameter inventory identity and CPU
-artifact inspection; neither is implemented yet.
+Parameter inventory identity and optimizer configuration identity use canonical
+JSON. CPU artifact inspection remains unimplemented.
 
 ## `minifield_training.core.parameters`
 
-Immutable records describing a caller-supplied parameter inventory:
+Build an immutable inventory from unique stored parameter shapes and an explicit
+weight-decay policy:
 
 ```python
 from minifield_training.core import parameters
 
-spec = parameters.FullParameterSpec(
-    name="decoder.weight",
-    shape=(4, 8),
-    source_dtype="bfloat16",
-    master_dtype="float32",
-    trainable=True,
-    decayed=True,
-    quantized=False,
+inventory = parameters.build_inventory(
+    {"embedding": (16, 8), "projection": (4, 8)},
+    format_id="example.parameters/1",
+    decayed_names=frozenset({"projection"}),
 )
-inventory = parameters.FullParameterInventory(
-    specs=(spec,),
-    parameter_count=32,
-    source_dtype="bfloat16",
-    master_dtype="float32",
-    quantization_profile=None,
-    sha256="caller-supplied digest",
-)
-inventory.names  # ("decoder.weight",)
-inventory.trainable_parameter_count  # 32
+inventory.names  # ("embedding", "projection")
+inventory.trainable_parameter_count  # 160
 ```
+
+`build_inventory` sorts parameter names, counts scalars and computes a SHA-256
+digest from canonical JSON. Identity includes the caller's format ID, shapes,
+dtypes, trainability, decay membership and quantization metadata. Source dtypes
+are `bfloat16`, `float16` or `float32`; master dtype must be `float32`.
+
+The required `decayed_names` set selects weight decay independently of tensor
+rank or name. An empty set disables decay. Callers choose their policy, including
+whether embeddings or vectors receive decay. `frozen_names` excludes leaves
+from gradients and updates. Unknown decay/frozen/quantized names are rejected,
+as is overlap between frozen and decayed names. A nonempty quantization profile
+is required when quantized names are supplied.
 
 `FullParameterSpec` is a frozen record for one supplied parameter row.
 `FullParameterInventory` is a frozen record holding the spec tuple plus
@@ -76,12 +77,12 @@ preserve the supplied spec order and multiplicity: `names` returns every row,
 `trainable_names`/`frozen_names` filter on `trainable`, and
 `trainable_parameter_count` sums `math.prod(spec.shape)` over trainable rows.
 
-The records never sort, validate, deduplicate, compute a digest, enforce FP32,
-infer decay or resolve tied aliases. Tied leaves must already appear as their
-unique stored rows before construction. Inventory membership, ordering, dtype
-and digest policies belong to the constructing builder and to consumers such
-as the optimizer transaction and checkpoint inspection, none of which are
-implemented here yet.
+Direct record construction performs no validation, sorting, deduplication,
+hashing or dtype enforcement. Use `build_inventory` for those supported
+construction checks. Tied aliases must already be resolved to unique stored
+rows before calling it. The model adapter supplies shapes and policy; the AdamW
+transaction consumes the resulting trainability and decay flags. Checkpoint
+inspection remains unimplemented.
 
-Tests: `uv run --no-sync pytest tests/core/test_parameters.py` with literal
-fixtures in [test_parameters.py](../../../tests/core/test_parameters.py).
+Tests: `uv run --no-sync pytest tests/core/` covers record views and immutability,
+explicit decay selection, rejected memberships, FP32 masters and digest changes.

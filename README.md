@@ -26,8 +26,8 @@ install the pinned JAX extra:
 uv pip install 'minifield-training[numerical]'
 ```
 
-`kernels` (and future `layers`, `models` and other numerical owners) require
-that extra. The development group resolves the same locked JAX plus NumPy for
+`kernels`, `layers`, `models`, `objectives` and `optimizers` require that
+extra. The development group resolves the same locked JAX plus NumPy for
 independent test oracles, so `uv sync --locked` covers both surfaces locally.
 
 ## What is enforced
@@ -40,8 +40,8 @@ independent test oracles, so `uv sync --locked` covers both surfaces locally.
   source archive/wheel builds and an isolated wheel installation.
 
 The local commit hook runs the fast structural checks. CI runs the full quality
-command. Hooks are bypassable; hosted branch protection still needs configuring
-when a remote is created. Nothing has been published.
+command. GitHub branch protection must require the `CPU quality and package`
+job; local hooks can be bypassed. Repository files don't enforce server settings.
 
 ## Package boundaries
 

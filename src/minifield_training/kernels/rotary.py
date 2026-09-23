@@ -1,4 +1,4 @@
-"""Rotary position embedding kernels used by LFM2 attention."""
+"""Unscaled full-head rotary embeddings with split-half rotation."""
 
 import jax
 import jax.numpy as jnp

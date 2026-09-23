@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from minifield_training.core import parameters as core_parameters
+from minifield_training.kernels import linear
 from minifield_training.kernels import normalization
 from minifield_training.kernels import selected_logits
 from minifield_training.kernels import types
@@ -174,9 +175,15 @@ def parameter_inventory(
     quantized_names: frozenset[str] = frozenset(),
     frozen_names: frozenset[str] = frozenset(),
 ) -> core_parameters.FullParameterInventory:
-    """Bind the checkpoint inventory to its hash under the LFM2.5 format."""
+    """Bind metadata with decay for every unfrozen matrix in this family."""
+    shapes = expected_shapes(cfg)
     return core_parameters.build_inventory(
-        expected_shapes(cfg),
+        shapes,
+        decayed_names=frozenset(
+            name
+            for name, shape in shapes.items()
+            if len(shape) == 2 and name not in frozen_names
+        ),
         format_id="minifield.lfm.full-parameters/1",
         source_dtype=source_dtype,
         master_dtype=master_dtype,
@@ -792,11 +799,7 @@ def logits(
         if cfg.tied_embeddings
         else parameters["lm_head.weight"]
     )
-    return jnp.matmul(
-        hidden,
-        head.astype(hidden.dtype).T,
-        precision=jax.lax.Precision.HIGHEST,
-    ).astype(jnp.float32)
+    return linear.full_linear(hidden, head).astype(jnp.float32)
 
 
 def selected_token_log_probs(

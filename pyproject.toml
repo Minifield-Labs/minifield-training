@@ -21,14 +21,12 @@ dev = [
     "build==1.6.1",
     # The numerical optional dependency owns the jax version pin.
     "jax",
-    "jsonschema==4.25.1",
     "mypy==1.17.1",
     "numpy==2.2.6",
     "pylint==3.3.8",
     "pyink==25.12.0",
     "pytest==8.4.2",
     "ruff==0.12.12",
-    "types-jsonschema==4.26.0.20260518",
 ]
 
 [tool.setuptools]

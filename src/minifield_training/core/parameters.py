@@ -59,6 +59,7 @@ def build_inventory(
     shapes: Mapping[str, tuple[int, ...]],
     *,
     format_id: str,
+    decayed_names: frozenset[str],
     source_dtype: str = "bfloat16",
     master_dtype: str = "float32",
     quantization_profile: str | None = None,
@@ -67,13 +68,16 @@ def build_inventory(
 ) -> FullParameterInventory:
     """Bind parameter shape, dtype, trainability, and decay metadata.
 
+    ``decayed_names`` explicitly selects leaves for weight decay, independently
+    of their names or shapes. An empty set disables decay. Unknown names and
+    overlap with ``frozen_names`` are rejected. The caller owns this policy.
+
     There is no implicit quantization policy: a caller must name a versioned
     quantization profile and its exact eligible leaf set before any row
     reports itself as quantized. ``frozen_names`` declares stored leaves that
     never receive a gradient or an optimizer update; they still load, run
     forward, checkpoint, and export like every other master, and they are
-    excluded from the decay mask. Matrix-only decay is an explicit optimizer
-    mask, not a trainability mask.
+    excluded from the decay mask.
     """
     if source_dtype not in {"bfloat16", "float16", "float32"}:
         raise ValueError("Unsupported checkpoint source dtype")
@@ -95,6 +99,18 @@ def build_inventory(
             "Frozen set names unknown tensors: "
             + ", ".join(sorted(unknown_frozen))
         )
+    unknown_decayed = decayed_names.difference(shapes)
+    if unknown_decayed:
+        raise ValueError(
+            "Decay set names unknown tensors: "
+            + ", ".join(sorted(unknown_decayed))
+        )
+    frozen_decayed = frozen_names.intersection(decayed_names)
+    if frozen_decayed:
+        raise ValueError(
+            "Frozen tensors cannot receive weight decay: "
+            + ", ".join(sorted(frozen_decayed))
+        )
     specs = tuple(
         FullParameterSpec(
             name=name,
@@ -102,7 +118,7 @@ def build_inventory(
             source_dtype=source_dtype,
             master_dtype=master_dtype,
             trainable=name not in frozen_names,
-            decayed=len(shape) == 2 and name not in frozen_names,
+            decayed=name in decayed_names,
             quantized=name in quantized_names,
         )
         for name, shape in sorted(shapes.items())
