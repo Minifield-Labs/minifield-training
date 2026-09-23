@@ -1,17 +1,30 @@
 """Offline chat-template and exact supervision checks."""
 
+from pathlib import Path
 from typing import cast
 
+import jax.numpy as jnp
+import numpy as np
 import pytest
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 from tokenizers.models import WordLevel  # type: ignore[import-untyped]
 import tokenizers.pre_tokenizers as pre_tokenizers  # type: ignore[import-untyped]
 from transformers import PreTrainedTokenizerFast
 
+from minifield_training.batching.sft import iter_updates
+from minifield_training.core.json_io import digest_file
 from minifield_training.datasets.conversations import parse_conversation
+from minifield_training.datasets.conversations import read_jsonl
 from minifield_training.datasets.preparation import prepare
+from minifield_training.datasets.prepared import PreparationSettings
+from minifield_training.datasets.prepared import iter_prepared
+from minifield_training.datasets.prepared import save_prepared
 from minifield_training.datasets.tokenization import ChatTokenizer
 from minifield_training.datasets.tokenization import tokenize_example
+from minifield_training.models.lfm2_5 import model
+from minifield_training.objectives import loss
+from minifield_training.optimizers import adamw
+from minifield_training.strategies import sft
 
 
 def local_tokenizer() -> ChatTokenizer:
@@ -169,3 +182,119 @@ def test_tool_only_target_and_reply_are_preserved() -> None:
     assert sum(first.loss_mask) > 0
     assert second.input_ids != first.input_ids
     assert sum(second.loss_mask) > 0
+
+
+def test_full_jsonl_to_replayed_sft_update(tmp_path: Path) -> None:
+    """A bounded offline record lowers tiny-model loss after artifact replay."""
+    source = tmp_path / "source.jsonl"
+    source.write_text(
+        '{"id":"r","source_group":"g","messages":['
+        '{"role":"user","content":"hello"},'
+        '{"role":"assistant","content":"world"}]}\n',
+        encoding="utf-8",
+    )
+    tokenizer = cast(PreTrainedTokenizerFast, local_tokenizer())
+    tokenizer_asset = tmp_path / "tokenizer.json"
+    template_asset = tmp_path / "template.jinja"
+    tokenizer_asset.write_text(
+        tokenizer.backend_tokenizer.to_str(), encoding="utf-8"
+    )
+    assert isinstance(tokenizer.chat_template, str)
+    template_asset.write_text(tokenizer.chat_template, encoding="utf-8")
+    settings = PreparationSettings("all", "seed", 0.0, 16, "error")
+    examples = []
+    for example in prepare(
+        read_jsonl(source),
+        mode=settings.mode,
+        seed=settings.seed,
+        validation_fraction=settings.validation_fraction,
+    ):
+        encoded = tokenize_example(
+            example,
+            cast(ChatTokenizer, tokenizer),
+            tokenizer_id=digest_file(tokenizer_asset),
+            template_id=digest_file(template_asset),
+            max_tokens=settings.max_tokens,
+        )
+        assert encoded is not None
+        examples.append(encoded)
+    assert len(examples) == 1
+    artifact = tmp_path / "prepared"
+    save_prepared(
+        artifact,
+        examples,
+        source=source,
+        tokenizer_asset=tokenizer_asset,
+        template_asset=template_asset,
+        settings=settings,
+    )
+    replayed = list(
+        iter_prepared(
+            artifact,
+            source=source,
+            tokenizer_asset=tokenizer_asset,
+            template_asset=template_asset,
+            settings=settings,
+        )
+    )
+    assert replayed == examples
+    batch = next(
+        iter_updates(
+            replayed,
+            microbatches=2,
+            rows_per_microbatch=1,
+            sequence_length=16,
+            pad_token_id=8,
+            vocab_size=12,
+            seed=0,
+        )
+    )
+    assert int(batch.microbatches["loss_mask"].sum()) == 3
+    assert np.asarray(batch.active).tolist() == [True, False]
+    cfg = model.Config(
+        hidden_size=4,
+        intermediate_size=8,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        vocab_size=12,
+        layer_types=("conv",),
+        conv_kernel=3,
+    )
+    rng = np.random.default_rng(7)
+    params = {
+        name: jnp.asarray(rng.normal(0, 0.1, shape), dtype=jnp.float32)
+        for name, shape in model.expected_shapes(cfg).items()
+    }
+    inventory = model.parameter_inventory(cfg)
+    current = adamw.initialize_state(params, inventory)
+
+    def measured_loss() -> float:
+        """Measure the real public model's selected next-token NLL."""
+        tensors = {key: value[0] for key, value in batch.microbatches.items()}
+        logits = model.forward(
+            current["params"],
+            tensors["input_ids"],
+            tensors["attention_mask"],
+            cfg,
+            dtype=jnp.float32,
+        )
+        total, count = loss.causal_loss_terms(
+            logits,
+            tensors["input_ids"],
+            tensors["loss_mask"],
+            tensors["attention_mask"],
+        )
+        return float(total / count)
+
+    before = measured_loss()
+    update = sft.make_lfm2_5_step(
+        cfg,
+        inventory,
+        adamw.AdamWConfig(0.03),
+        dtype=jnp.float32,
+    )
+    for _ in range(6):
+        result = update(current, batch.microbatches, batch.active)
+        assert bool(result.committed)
+        current = result.state
+    assert measured_loss() < before - 0.05

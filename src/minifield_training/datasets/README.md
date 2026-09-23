@@ -43,3 +43,23 @@ call fields must affect the rendered IDs; ignored tool inputs fail closed.
 Callers must pin and audit a template's role, tool, and end-marker behavior.
 Examples exceeding `max_tokens` either raise or return `None` with
 `overlength="drop"`; no sequence is cut.
+
+## Verified local reuse
+
+`save_prepared(directory, examples, source=..., tokenizer_asset=...,
+template_asset=..., settings=...)` writes content-named JSONL and publishes a
+versioned manifest only after validation. `iter_prepared` recomputes SHA-256
+from the actual source JSONL, tokenizer serialization, and template file,
+checks the requested preparation settings, then verifies payload bytes, schema,
+IDs, source-group split assignments, lengths, and masks before yielding rows.
+Use absolute, symlink-free local paths. Store artifacts outside Git. Asset
+identity is a byte digest; labels alone don't authorize cache reuse. Callers
+must serialize the exact tokenizer and template used for tokenization into the
+supplied files and use their digests as `tokenizer_id` and `template_id`.
+No remote artifact registry or in-place mutation protection is included.
+
+The bounded synthetic acceptance path is executable with
+`uv run --no-sync pytest tests/datasets/test_tokenization.py::test_full_jsonl_to_replayed_sft_update`.
+It reads JSONL, prepares and tokenizes with an offline local vocabulary,
+replays a verified artifact, builds a padded update, and decreases selected
+next-token loss on the public tiny LFM2.5 model. This is CPU evidence only.

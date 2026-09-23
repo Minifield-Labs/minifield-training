@@ -27,7 +27,13 @@ uv pip install 'minifield-training[numerical]'
 ```
 
 `kernels`, `layers`, `models`, `objectives` and `optimizers` require that
-extra. The development group resolves the same locked JAX plus NumPy for
+extra. For offline chat-template tokenization, install the pinned `text` extra:
+
+```sh
+uv pip install 'minifield-training[text]'
+```
+
+The base wheel continues to import `datasets` without this extra. The development group resolves the same locked JAX plus NumPy for
 independent test oracles, so `uv sync --locked` covers both surfaces locally.
 
 ## What is enforced
