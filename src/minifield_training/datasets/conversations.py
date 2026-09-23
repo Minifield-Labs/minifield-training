@@ -93,6 +93,8 @@ def parse_conversation(
         content = raw.get("content", "")
         if not isinstance(content, str):
             raise ValueError(f"message {index}: content must be text")
+        if pending and role != "tool":
+            raise ValueError(f"message {index}: unresolved tool call")
         calls: list[ToolCall] = []
         for call in _objects(raw.get("tool_calls", []), "tool_calls"):
             if set(call) != {"id", "name", "arguments"}:
@@ -120,8 +122,6 @@ def parse_conversation(
             raise ValueError(
                 f"message {index}: tool_call_id requires tool role"
             )
-        if pending and role not in {"assistant", "tool"}:
-            raise ValueError(f"message {index}: unresolved tool call")
         if role == "assistant" and not content and not calls:
             raise ValueError(f"message {index}: empty assistant message")
         messages.append(Message(role, content, tuple(calls), reply_id))

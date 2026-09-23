@@ -38,9 +38,13 @@ extra. Training examples use `tokenize=True` and
 `add_generation_prompt=False`. The adapter masks complete selected assistant
 messages, including template control and end tokens. It verifies each prefix
 against the full token sequence and rejects templates whose tokenization
-changes earlier tokens when another message is appended. Tool definitions and
-call fields must affect the rendered IDs; ignored tool inputs fail closed.
-Callers must pin and audit a template's role, tool, and end-marker behavior.
+changes earlier tokens when another message is appended. Tool-bearing examples
+require `audited_tool_template=True`. Admission probes each
+tool-definition leaf, call ID, name, argument leaf, and reply ID; every change
+must alter both rendered text and token IDs. These probes catch dropped fields,
+but cannot prove arbitrary Jinja semantics. Callers must pin the template and
+maintain exact golden tests for role, tool, and end-marker behavior.
+
 Examples exceeding `max_tokens` either raise or return `None` with
 `overlength="drop"`; no sequence is cut.
 
