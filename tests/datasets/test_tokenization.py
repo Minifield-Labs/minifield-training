@@ -174,7 +174,7 @@ def test_all_mode_and_overlength() -> None:
         )
 
 
-def _tool_examples() -> list[Example]:
+def _tool_examples(argument: str | float = "hello") -> list[Example]:
     """Create one tool call, matched reply, and assistant continuation."""
     record = parse_conversation(
         {
@@ -190,7 +190,7 @@ def _tool_examples() -> list[Example]:
                         {
                             "id": "call-1",
                             "name": "find",
-                            "arguments": {"q": "hello"},
+                            "arguments": {"q": argument},
                         }
                     ],
                 },
@@ -267,6 +267,24 @@ def test_tool_template_cannot_drop_definitions_arguments_or_reply_id(
             max_tokens=256,
             audited_tool_template=True,
         )
+
+
+def test_large_finite_numeric_tool_argument_is_admitted() -> None:
+    """A faithful template accepts a float whose value plus 1 rounds away."""
+    tokenizer = byte_tokenizer(_TOOL_TEMPLATE)
+    tokens = tokenize_example(
+        _tool_examples(1e20)[0],
+        tokenizer,
+        tokenizer_id="byte-v1",
+        template_id="tool-template-v1",
+        max_tokens=256,
+        audited_tool_template=True,
+    )
+    assert tokens is not None
+    rendered = cast(PreTrainedTokenizerFast, tokenizer).decode(
+        tokens.input_ids, skip_special_tokens=False
+    )
+    assert '"arguments": {"q": 1e+20}' in rendered
 
 
 def test_tool_template_requires_explicit_audit() -> None:
