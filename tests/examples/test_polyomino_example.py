@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from datasets import Dataset  # type: ignore[import-untyped]
+import jax.numpy as jnp
 import pytest
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 from tokenizers.models import WordLevel  # type: ignore[import-untyped]
@@ -15,8 +16,11 @@ from examples.polyomino import engine
 from examples.polyomino import serialize
 from examples.polyomino import source
 from examples.polyomino import train
+from minifield_training.checkpoints import training_state
+from minifield_training.core import parameters
 from minifield_training.engine.classification_run import RunConfig
 from minifield_training.models.lfm2_5 import model
+from minifield_training.optimizers import adamw
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -98,6 +102,36 @@ def test_block_policy_binds_checkpoint_source() -> None:
     args.no_remat = True
     plain = train.source_identity(args, cfg, sequence_length=512)
     assert checkpointed != plain
+
+
+def test_smoke_rejects_changed_checkpoint_tensor(tmp_path: Path) -> None:
+    """The smoke checks restored values against the live update."""
+    inventory = parameters.build_inventory(
+        {"weight": (2,)},
+        format_id="smoke/1",
+        decayed_names=frozenset(),
+    )
+    current = adamw.initialize_state(
+        {"weight": jnp.asarray([1.0, 2.0], dtype=jnp.float32)},
+        inventory,
+    )
+    cursor = training_state.Cursor("smoke", "data", "source", 0)
+    directory = tmp_path / "checkpoint"
+    training_state.save(
+        directory,
+        current,
+        inventory,
+        optimizer_id="adamw",
+        cursor=cursor,
+    )
+    train.verify_checkpoint_roundtrip(
+        directory, current, cursor, inventory, "adamw"
+    )
+    current["params"]["weight"] = jnp.asarray([1.0, 3.0], dtype=jnp.float32)
+    with pytest.raises(RuntimeError, match="params/weight"):
+        train.verify_checkpoint_roundtrip(
+            directory, current, cursor, inventory, "adamw"
+        )
 
 
 @pytest.mark.parametrize("module", ("train", "evaluate"))

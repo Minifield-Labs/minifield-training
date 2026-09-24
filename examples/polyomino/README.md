@@ -18,6 +18,9 @@ generator in this example.
 Run the [Colab notebook](../colab_polyomino_classifier.ipynb) on one v5e TPU.
 It downloads pinned Base weights and the pinned dataset, runs a 2-update
 smoke, then offers a bounded 3-hour training run with persistent checkpoints.
+A smoke checkpoint is reloaded and every parameter, optimizer moment, step,
+and cursor is compared with the live state before gameplay starts. A mismatch
+stops the run with the affected tensor name.
 A full FP32 checkpoint is about 2.75 GB. Keep the Hugging Face cache and
 checkpoints outside Git.
 

@@ -1,6 +1,7 @@
 """Warm-start or resume the Base polyomino decision classifier on one device."""
 
 import argparse
+from collections.abc import Mapping
 import dataclasses
 import hashlib
 import json
@@ -10,6 +11,7 @@ import time
 from typing import cast
 
 import jax
+import numpy as np
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
 from examples.polyomino import source
@@ -17,9 +19,11 @@ from examples.polyomino.evaluate import ALLOWED
 from examples.polyomino.evaluate import make_evaluator
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
+from minifield_training.core import parameters as core_parameters
 from minifield_training.engine import classification_run
 from minifield_training.models.lfm2_5 import model
 from minifield_training.optimizers import adamw
+from minifield_training.optimizers import state as optimizer_state
 from minifield_training.strategies import classification
 from minifield_training.strategies import pretrained
 
@@ -65,6 +69,46 @@ def source_identity(
 def optimizer_config(learning_rate: float) -> adamw.AdamWConfig:
     """Use the shared AdamW implementation with one explicit learning rate."""
     return adamw.AdamWConfig(learning_rate=learning_rate)
+
+
+def verify_checkpoint_roundtrip(
+    directory: Path,
+    current: optimizer_state.State,
+    cursor: training_state.Cursor,
+    inventory: core_parameters.FullParameterInventory,
+    optimizer_id: str,
+) -> None:
+    """Check every saved parameter and moment against live device state."""
+    with jax.default_device(jax.devices("cpu")[0]):
+        restored, restored_cursor = training_state.load(
+            directory,
+            inventory,
+            optimizer_id=optimizer_id,
+            run_id=cursor.run_id,
+            data_sha256=cursor.data_sha256,
+            source_id=cursor.source_id,
+        )
+    if restored_cursor != cursor or not np.array_equal(
+        np.asarray(current["step"]), np.asarray(restored["step"])
+    ):
+        raise RuntimeError("Checkpoint cursor or optimizer step changed")
+
+    def compare_group(
+        group: str,
+        live: Mapping[str, jax.Array],
+        saved: Mapping[str, jax.Array],
+    ) -> None:
+        """Identify the first tensor changed by serialization."""
+        for name in inventory.names:
+            if not np.array_equal(
+                np.asarray(live[name]),
+                np.asarray(saved[name]),
+            ):
+                raise RuntimeError(f"Checkpoint changed {group}/{name}")
+
+    compare_group("params", current["params"], restored["params"])
+    compare_group("m", current["m"], restored["m"])
+    compare_group("v", current["v"], restored["v"])
 
 
 def latest_checkpoint(
@@ -132,6 +176,7 @@ def main() -> None:
     parser.add_argument("--fuse-accumulation", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=0.0001)
     parser.add_argument("--checkpoint-every", type=int, default=5000)
+    parser.add_argument("--verify-checkpoint", action="store_true")
     parser.add_argument("--report-every", type=int, default=10)
     parser.add_argument("--eval-games", type=int, default=0)
     parser.add_argument("--eval-max-ticks", type=int, default=2000)
@@ -231,6 +276,28 @@ def main() -> None:
         if args.eval_games > 0
         else None
     )
+    if args.verify_checkpoint:
+        game_evaluator = evaluator
+
+        def verify_evaluator(
+            current: optimizer_state.State, step: int
+        ) -> dict[str, float]:
+            """Reload the saved smoke checkpoint before optional gameplay."""
+            verify_checkpoint_roundtrip(
+                args.checkpoint_root / f"step-{step:08d}",
+                current,
+                training_state.Cursor(
+                    args.run_id, data_sha256, source_id, step
+                ),
+                inventory,
+                optimizer.implementation_identity,
+            )
+            metrics = {"checkpoint_roundtrip_verified": 1.0}
+            if game_evaluator is not None:
+                metrics.update(game_evaluator(current, step))
+            return metrics
+
+        evaluator = verify_evaluator
 
     tracing = False
 
