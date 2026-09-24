@@ -25,8 +25,8 @@ contracts, and leading dimensions raise `ValueError` at tracing time.
 The update is compatible with `jax.jit`. FP32 masters, moments, accumulated
 loss, gradients and count are retained. CPU synthetic tests cover token-weighted
 equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
-agreement. CUDA and mixed-device performance remain unqualified. Host loops,
-checkpoints, scheduling and packed-batch construction aren't part of `step`.
+agreement. CUDA and mixed-device performance remain unqualified. Checkpoints,
+epoch scheduling and packed-batch construction aren't part of `step`.
 
 `step.make_streaming_step` keeps the same loss/count and AdamW contract for a
 single-device run, but compiles one physical gradient, device-side addition,
@@ -35,11 +35,14 @@ microbatches and never reads gradient values. This bounds the compiled reverse
 pass to one physical batch instead of embedding it inside a full-model scan.
 The classifier runner calls this form directly; other logical steps retain the
 scanned JIT path.
+The donated optimizer consumes its input buffers, including on a rejected
+commit. Continue from the returned `CommitResult.state` in either case.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
 `classification_run.run` is the bounded single-device host lifecycle for
-hard-label sequence updates. It JIT-compiles the supplied logical update,
+hard-label sequence updates. It JIT-compiles a scanned logical update or calls
+the already compiled stages of a streaming update,
 passes fixed `[M, B, T]` batches from host records, checkpoints the complete
 state after committed updates, and resumes deterministic epoch shuffles from
 the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each

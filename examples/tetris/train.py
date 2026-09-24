@@ -300,6 +300,15 @@ def main() -> None:
         """Emit bounded scalar progress and artifact paths as JSON."""
         print(json_io.canonical(message), flush=True)
 
+    report(
+        {
+            "event": "first_update_ready",
+            "step": float(cursor.next_batch),
+            "microbatches": float(args.microbatches),
+            "rows": float(args.rows),
+            "sequence_length": float(args.sequence_length),
+        }
+    )
     classification_run.run(
         examples,
         full_state,
