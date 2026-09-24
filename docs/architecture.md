@@ -31,8 +31,9 @@ implemented capability.
 The complete permitted dependency lists live in `architecture.toml`; this table
 explains their purpose. Adding a directory never implicitly grants dependencies.
 Checkpoint modules use the optional safetensors package to serialize FP32 state;
-the base wheel still has no mandatory dependencies. A family-specific strategy
-supplies the expected pretrained tensor inventory to the generic reader.
+the base wheel still has no mandatory dependencies. Model families own
+pretrained release metadata and adapters implementing `models.contracts.PretrainedModel`.
+The generic pretrained loader receives an explicit source and adapter.
 The checker rejects cycles in those owner rules, unknown owners and source files
 at the package root (apart from its docstring-only initializer).
 
@@ -41,6 +42,12 @@ and evaluators import `models.contracts`, and receive model implementations from
 strategy composition. Shared model contracts cannot import a concrete family.
 Use `kernels/types.py` for shared numerical aliases and `optimizers/state.py` for
 optimizer-specific state. Keep the host-only `core` useful without JAX installed.
+
+Batching contracts live in `batching.contracts`: one `PhysicalUpdate`, a
+`BatchStrategy` for epoch iteration, and a `BatchSource` for replayable streams.
+The dense strategy shares observation admission, ordering and padding, while
+`TargetEncoder` implementations supply task-specific supervision. The engine
+receives these interfaces and has no concrete batching or dataset-record import.
 
 All package initializers contain only a docstring. Import concrete modules;
 re-export layers obscure ownership and trigger import-time work. Add a

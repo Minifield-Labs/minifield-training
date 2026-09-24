@@ -14,7 +14,9 @@ from tokenizers.models import WordLevel
 import tokenizers.pre_tokenizers as pre_tokenizers  # type: ignore[import-untyped]
 from transformers import PreTrainedTokenizerFast
 
-from minifield_training.batching.sft import iter_updates
+from minifield_training.batching import contracts
+from minifield_training.batching import dense
+from minifield_training.batching import sft as sft_batching
 from minifield_training.core.json_io import canonical
 from minifield_training.core.json_io import digest_file
 from minifield_training.datasets.conversations import parse_conversation
@@ -398,15 +400,9 @@ def test_full_jsonl_to_replayed_sft_update(tmp_path: Path) -> None:
     )
     assert replayed == examples
     batch = next(
-        iter_updates(
-            replayed,
-            microbatches=2,
-            rows_per_microbatch=1,
-            sequence_length=16,
-            pad_token_id=8,
-            vocab_size=12,
-            seed=0,
-        )
+        dense.DenseBatchStrategy(
+            contracts.BatchShape(2, 1, 16, 8, 12), sft_batching.TokenTargets()
+        ).iter_updates(replayed, seed=0)
     )
     assert int(batch.microbatches["loss_mask"].sum()) == 3
     assert np.asarray(batch.active).tolist() == [True, False]
@@ -453,7 +449,7 @@ def test_full_jsonl_to_replayed_sft_update(tmp_path: Path) -> None:
         dtype=jnp.float32,
     )
     for _ in range(6):
-        result = update(current, batch.microbatches, batch.active)
+        result = update(current, batch.microbatches, jnp.asarray(batch.active))
         assert bool(result.committed)
         current = result.state
     assert measured_loss() < before - 0.05

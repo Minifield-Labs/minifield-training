@@ -1,4 +1,4 @@
-"""Reject substantial AST clones and oversized production modules/functions."""
+"""Reject copied contracts, substantial AST clones and oversized source."""
 
 import argparse
 import ast
@@ -20,9 +20,10 @@ class Policy:
 
 
 @dataclasses.dataclass(frozen=True)
-class Function:
-    """One function's immutable diagnostic and comparison information."""
+class CloneCandidate:
+    """One definition's immutable diagnostic and comparison information."""
 
+    kind: str
     location: str
     fingerprint: str
 
@@ -110,8 +111,8 @@ def _fingerprint(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 
 def _inspect_module(
     path: pathlib.Path, root: pathlib.Path, policy: Policy
-) -> tuple[list[str], list[Function]]:
-    """Return a module's size/syntax diagnostics and substantial functions."""
+) -> tuple[list[str], list[CloneCandidate]]:
+    """Return size/syntax diagnostics, functions and named record contracts."""
     relative = path.relative_to(root).as_posix()
     if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
         return [
@@ -128,8 +129,24 @@ def _inspect_module(
             f"{relative}: module has {module_statements} statements; "
             f"limit is {policy.max_module_statements}"
         )
-    functions: list[Function] = []
+    candidates: list[CloneCandidate] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            fields = sorted(
+                member.target.id
+                for member in node.body
+                if isinstance(member, ast.AnnAssign)
+                and isinstance(member.target, ast.Name)
+            )
+            if fields:
+                field_names = ", ".join(fields)
+                candidates.append(
+                    CloneCandidate(
+                        "record contract",
+                        f"{relative}:{node.lineno} ({node.name})",
+                        f"{node.name}({field_names})",
+                    )
+                )
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         location = f"{relative}:{node.lineno} ({node.name})"
@@ -140,12 +157,14 @@ def _inspect_module(
                 f"limit is {policy.max_function_statements}"
             )
         if statements >= policy.min_clone_statements:
-            functions.append(Function(location, _fingerprint(node)))
-    return errors, functions
+            candidates.append(
+                CloneCandidate("function AST", location, _fingerprint(node))
+            )
+    return errors, candidates
 
 
 def inspect(root: pathlib.Path) -> list[str]:
-    """Return all policy, parse, size and substantial-clone violations.
+    """Return all policy, parse, size, contract and function-clone violations.
 
     Args:
         root: Repository root containing duplication.toml and production source.
@@ -164,7 +183,7 @@ def inspect(root: pathlib.Path) -> list[str]:
             "src/minifield_training: production source directory is invalid"
         ]
     errors: list[str] = []
-    groups: dict[str, list[Function]] = {}
+    groups: dict[tuple[str, str], list[CloneCandidate]] = {}
     for path in sorted(source.rglob("*")):
         if path.is_symlink() and path.is_dir():
             relative = path.relative_to(root).as_posix()
@@ -172,15 +191,19 @@ def inspect(root: pathlib.Path) -> list[str]:
                 f"{relative}: production directories cannot be symlinked"
             )
     for path in sorted(source.rglob("*.py")):
-        module_errors, functions = _inspect_module(path, root, policy)
+        module_errors, candidates = _inspect_module(path, root, policy)
         errors.extend(module_errors)
-        for function in functions:
-            groups.setdefault(function.fingerprint, []).append(function)
-    for fingerprint, functions in groups.items():
-        if len(functions) > 1:
-            locations = "; ".join(function.location for function in functions)
+        for candidate in candidates:
+            groups.setdefault(
+                (candidate.kind, candidate.fingerprint), []
+            ).append(candidate)
+    for (kind, fingerprint), candidates in groups.items():
+        if len(candidates) > 1:
+            locations = "; ".join(
+                candidate.location for candidate in candidates
+            )
             errors.append(
-                f"duplicate function AST [{fingerprint}]: {locations}; "
+                f"duplicate {kind} [{fingerprint}]: {locations}; "
                 "extract a shared owner or document distinct behavior"
             )
     return sorted(errors)

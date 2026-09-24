@@ -15,11 +15,10 @@ from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
 from examples.polyomino import engine
 from examples.polyomino import serialize
-from minifield_training.batching import classification as batching
+from minifield_training.batching import contracts as batching
 from minifield_training.core import json_io
 from minifield_training.datasets.labeled import LabeledSequence
-from minifield_training.engine.classification_run import RunConfig
-from minifield_training.strategies import pretrained
+from minifield_training.models.lfm2_5 import pretrained
 
 DATASET_ID = "protodotdesign/polyomino-decisions-v1"
 DATASET_REVISION = "d1a79caa4eaeba129630f858f9c2de7d6de7533a"
@@ -94,11 +93,12 @@ def sequence_from_row(
 
 @dataclass(frozen=True)
 class HFDatasetBatchSource:
-    """Visit each published decision once in a seeded global order."""
+    """Visit decisions in dense chunks, each producing one logical update."""
 
     data: Dataset
     tokenizer: Tokenizer
-    config: RunConfig
+    strategy: batching.BatchStrategy[LabeledSequence]
+    seed: int = 17
 
     def __call__(
         self, start_update: int, deadline: float | None = None
@@ -106,18 +106,10 @@ class HFDatasetBatchSource:
         """Resume at an update boundary without reusing earlier rows."""
         if start_update < 0:
             raise ValueError("Negative update cursor")
-        capacity = self.config.microbatches * self.config.rows_per_microbatch
-        order = np.random.default_rng(self.config.seed).permutation(
-            len(self.data)
-        )
+        capacity = self.strategy.shape.capacity
+        order = np.random.default_rng(self.seed).permutation(len(self.data))
         total = math.ceil(len(order) / capacity)
-        stop = min(
-            total,
-            start_update + self.config.max_steps
-            if self.config.max_steps is not None
-            else total,
-        )
-        for update_index in range(start_update, stop):
+        for update_index in range(start_update, total):
             if deadline is not None and time.monotonic() >= deadline:
                 return
             selected = [
@@ -134,14 +126,8 @@ class HFDatasetBatchSource:
                 )
                 for offset in range(len(selected))
             ]
-            yield from batching.iter_updates(
-                examples,
-                microbatches=self.config.microbatches,
-                rows_per_microbatch=self.config.rows_per_microbatch,
-                sequence_length=self.config.sequence_length,
-                pad_token_id=self.config.pad_token_id,
-                vocab_size=self.config.vocab_size,
-                allowed_classes=self.config.allowed_classes,
-                padding_label=self.config.padding_label,
-                seed=self.config.seed,
-            )
+            if self.strategy.update_count(examples) != 1:
+                raise ValueError(
+                    "HF decision chunks must produce exactly one update"
+                )
+            yield from self.strategy.iter_updates(examples, seed=self.seed)
