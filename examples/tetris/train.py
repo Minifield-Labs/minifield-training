@@ -263,7 +263,7 @@ def main() -> None:
                 flush=True,
             )
             return
-    update = classification.make_lfm2_5_step(
+    update = classification.make_lfm2_5_streaming_step(
         cfg, ALLOWED, inventory, optimizer, attention_backend="dense"
     )
     config = classification_run.RunConfig(

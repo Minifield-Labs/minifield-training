@@ -130,6 +130,38 @@ def make_lfm2_5_step(
     attention_backend: str = "dense",
 ) -> step.LogicalStep:
     """Bind last-valid logits and decision-count loss to shared AdamW."""
+    return step.make_step(
+        _loss_terms(cfg, allowed, inventory, dtype, attention_backend),
+        inventory,
+        optimizer,
+    )
+
+
+def make_lfm2_5_streaming_step(
+    cfg: model.Config,
+    allowed: tuple[bool, ...],
+    inventory: core_parameters.FullParameterInventory,
+    optimizer: adamw.AdamWConfig,
+    *,
+    dtype: types.DType = jnp.bfloat16,
+    attention_backend: str = "dense",
+) -> step.StreamingStep:
+    """Compile one physical gradient at a time for a single device."""
+    return step.make_streaming_step(
+        _loss_terms(cfg, allowed, inventory, dtype, attention_backend),
+        inventory,
+        optimizer,
+    )
+
+
+def _loss_terms(
+    cfg: model.Config,
+    allowed: tuple[bool, ...],
+    inventory: core_parameters.FullParameterInventory,
+    dtype: types.DType,
+    attention_backend: str,
+) -> step.LossTerms:
+    """Bind the exact model inventory to summed hard-label terms."""
     _check_config(cfg, allowed)
     expected = parameter_inventory(cfg, allowed)
     if inventory.sha256 != expected.sha256:
@@ -158,4 +190,4 @@ def make_lfm2_5_step(
             safe_class=safe_class,
         )
 
-    return step.make_step(loss_terms, inventory, optimizer)
+    return loss_terms

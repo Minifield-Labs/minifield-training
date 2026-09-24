@@ -28,6 +28,14 @@ equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
 agreement. CUDA and mixed-device performance remain unqualified. Host loops,
 checkpoints, scheduling and packed-batch construction aren't part of `step`.
 
+`step.make_streaming_step` keeps the same loss/count and AdamW contract for a
+single-device run, but compiles one physical gradient, device-side addition,
+normalization, and donated commit as separate programs. The host selects active
+microbatches and never reads gradient values. This bounds the compiled reverse
+pass to one physical batch instead of embedding it inside a full-model scan.
+The classifier runner calls this form directly; other logical steps retain the
+scanned JIT path.
+
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
 `classification_run.run` is the bounded single-device host lifecycle for

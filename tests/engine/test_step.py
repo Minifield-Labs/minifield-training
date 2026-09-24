@@ -151,3 +151,55 @@ def test_bad_batch_structure_rejected() -> None:
     update = step.make_step(_terms, inventory, config)
     with pytest.raises(ValueError, match="common leading axis"):
         update(initial, {"x": jnp.ones((2, 1))}, jnp.asarray([True]))
+
+
+def test_streaming_matches_scanned_update_and_skips_inactive() -> None:
+    """Separate gradient programs preserve count-weighted AdamW semantics."""
+    inventory, config, initial = _setup()
+    physical = _batch()
+    scanned = step.make_step(_terms, inventory, config)(
+        initial, physical, jnp.asarray([True, True])
+    )
+    scanned_values = jax.tree.map(
+        lambda value: np.asarray(value).copy(), scanned
+    )
+    _, _, fresh_initial = _setup()
+    streamed = step.make_streaming_step(_terms, inventory, config)(
+        fresh_initial, physical, jnp.asarray([True, True])
+    )
+    assert bool(streamed.committed)
+    np.testing.assert_allclose(streamed.loss, scanned_values.loss, rtol=1e-6)
+    for group in ("params", "m", "v"):
+        for name in initial[group]:
+            np.testing.assert_allclose(
+                streamed.state[group][name],
+                scanned_values.state[group][name],
+                rtol=1e-6,
+            )
+
+    _, _, second_initial = _setup()
+    physical["x"] = physical["x"].at[1].set(jnp.nan)
+    skipped = step.make_streaming_step(_terms, inventory, config)(
+        second_initial, physical, jnp.asarray([True, False])
+    )
+    assert bool(skipped.committed)
+    np.testing.assert_allclose(skipped.loss, 9.0)
+
+
+def test_streaming_rejects_invalid_count_without_committing() -> None:
+    """A bad physical count leaves every donated input leaf recoverable."""
+    inventory, config, initial = _setup()
+    snapshot = jax.tree.map(lambda value: np.asarray(value).copy(), initial)
+
+    def bad_terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Expose a finite gradient paired with an invalid count."""
+        return params["weight"] * batch["x"][0], jnp.float32(-1)
+
+    result = step.make_streaming_step(bad_terms, inventory, config)(
+        initial, {"x": jnp.ones((1, 1))}, jnp.asarray([True])
+    )
+    assert not bool(result.committed)
+    assert int(result.code) == adamw.CommitCode.ACCUMULATION_INVALID
+    _same_state(result.state, snapshot)

@@ -79,7 +79,7 @@ def require_single_device(platform: str | None = None) -> jax.Device:
 def run(
     examples: Sequence[LabeledSequence],
     initial_state: state.State,
-    update: step.LogicalStep,
+    update: step.LogicalStep | step.StreamingStep,
     inventory: core_parameters.FullParameterInventory,
     config: RunConfig,
     *,
@@ -105,7 +105,9 @@ def run(
         raise ValueError("Optimizer step and data cursor disagree")
     capacity = config.microbatches * config.rows_per_microbatch
     updates_per_epoch = math.ceil(len(examples) / capacity)
-    compiled = jax.jit(update)
+    compiled = (
+        update if isinstance(update, step.StreamingStep) else jax.jit(update)
+    )
     current = initial_state
     started = time.monotonic()
     committed = 0
