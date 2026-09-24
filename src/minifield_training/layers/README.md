@@ -13,6 +13,10 @@ RMS normalization accumulates in FP32 and returns the activation dtype.
 Bias, dropout and parameter initialization aren't part of these contracts.
 Callers validate compatible dimensions, binary masks and cache bounds.
 
+`classification.last_valid_logits` gathers the final valid state of each
+right-padded sequence and calls the existing FP32-master linear kernel once
+for `[batch, classes]` logits. It never constructs vocabulary-wide logits.
+
 `feed_forward.swiglu_ffn(x, weights, eps)` applies pre-RMS normalization,
 `SiLU(gate) * up`, a down projection and the original-input residual.
 `FeedForwardWeights` contains `norm`, `gate`, `up` and `down`.

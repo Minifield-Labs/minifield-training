@@ -1,5 +1,11 @@
 # Conversation admission
 
+`labeled.LabeledSequence` is a product-neutral record for one complete
+tokenized observation, hard label, stable record ID, and group ID. The
+classification batcher validates lengths, token IDs, and allowed labels before
+device transfer. Product-specific serialization and tokenizer calls remain in
+the consuming experiment.
+
 `read_jsonl(path)` streams one neutral JSON envelope per line. Each envelope has
 an `id`, a caller-assigned `source_group`, ordered `messages`, and optional
 `tools` definitions. A message has `role` (`system`, `user`, `assistant`, or
