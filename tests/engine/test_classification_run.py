@@ -123,6 +123,25 @@ def test_requested_tpu_fails_on_cpu() -> None:
         classification_run.require_single_device("tpu")
 
 
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_time_limit_is_rejected(seconds: float) -> None:
+    """A malformed time bound cannot turn a run into an endless job."""
+    with pytest.raises(ValueError, match="Invalid or unbounded"):
+        classification_run.RunConfig(
+            microbatches=1,
+            rows_per_microbatch=1,
+            sequence_length=3,
+            pad_token_id=0,
+            vocab_size=8,
+            allowed_classes=(True, True),
+            padding_label=1,
+            seed=0,
+            checkpoint_every=1,
+            report_every=1,
+            max_seconds=seconds,
+        )
+
+
 def test_rejected_step_publishes_no_checkpoint(tmp_path: Path) -> None:
     """A failed update cannot advance the persistent data cursor."""
     inventory = parameters.build_inventory(

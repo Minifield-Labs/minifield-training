@@ -55,7 +55,7 @@ class RunConfig:
             or self.max_steps is not None
             and self.max_steps < 1
             or self.max_seconds is not None
-            and self.max_seconds <= 0
+            and (not math.isfinite(self.max_seconds) or self.max_seconds <= 0)
         ):
             raise ValueError("Invalid or unbounded classification run")
 
