@@ -45,7 +45,7 @@ checkpoints, gameplay and the first update. `last_update_seconds` is the most
 recent update-call time. Pass `annotate_steps=True` to label every update with
 its global `train` step number in a JAX trace, including resumed updates.
 The runner never starts or exports a trace. Callers choose the capture window;
-the Tetris example restricts it to a short run and exports after the final
+the Polyomino example restricts it to a short run and exports after the final
 checkpoint. Profiling output stays in the caller's configured directory.
 
 `step.make_streaming_step(..., fuse_accumulation=True)` combines each later
@@ -67,3 +67,16 @@ must be the sole visible JAX device or startup fails clearly. The caller
 supplies an explicit persistent checkpoint path. CPU tests cover save/restore,
 cursor advance, callback boundaries, and TPU absence. TPU compilation,
 throughput, and full-model gameplay remain unverified here.
+
+For a continuously generated dataset, pass `examples=None` and a
+`batch_source(next_batch, deadline)` callback. The deadline is an absolute
+`time.monotonic()` value or `None`. The callback returns an iterator of
+`batching.classification.PhysicalUpdate` values starting at that global logical
+update index. It must produce the same unread updates after restore, keep game
+and decision identities unique, and provide enough batches to reach the run's
+step or time bound. It must stop waiting for input at the deadline. The
+runner saves committed work before closing the iterator on a normal stop, and
+raises if the source ends early. Finite `examples` keep their seeded epoch
+behavior; passing both input modes is an error. The checkpoint cursor
+identifies the next unread update. Its data/source IDs must identify the
+generator and deterministic settings as well as any pre-generated inputs.
