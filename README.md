@@ -37,6 +37,10 @@ uv pip install 'minifield-training[text]'
 The base wheel continues to import `datasets` without this extra. The development group resolves the same locked JAX plus NumPy for
 independent test oracles, so `uv sync --locked` covers both surfaces locally.
 
+The [Tetris decision example](examples/tetris/README.md) runs directly from a
+clone and uses the shared classifier to fine-tune the pinned Base model. Its
+game, expert, serializer and gameplay callback stay outside the library wheel.
+
 ## What is enforced
 
 - Explicit dependency directions, model-family isolation, host-safe inspection,

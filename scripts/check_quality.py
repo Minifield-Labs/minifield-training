@@ -9,7 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def main() -> None:
     """Check structure, style, strict types, behavior, and installation."""
-    paths = ["src", "scripts", "tests"]
+    paths = ["src", "scripts", "tests", "examples"]
     modules = sorted(
         str(path.relative_to(ROOT))
         for directory in paths
@@ -26,9 +26,9 @@ def main() -> None:
             "--workers=1",
             "--check",
             "--diff",
-            *paths,
+            *modules,
         ],
-        [sys.executable, "-m", "ruff", "check", *paths],
+        [sys.executable, "-m", "ruff", "check", *modules],
         [sys.executable, "-m", "pylint", "--jobs=1", *modules],
         [
             sys.executable,
