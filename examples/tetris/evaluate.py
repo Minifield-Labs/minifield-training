@@ -121,6 +121,8 @@ def main() -> None:
     parser.add_argument("--sequence-length", type=int, default=512)
     parser.add_argument("--data-seed", type=int, default=17)
     parser.add_argument("--head-seed", type=int, default=6)
+    parser.add_argument("--no-remat", action="store_true")
+    parser.add_argument("--fuse-accumulation", action="store_true")
     parser.add_argument("--microbatches", type=int, default=4)
     parser.add_argument("--rows", type=int, default=2)
     parser.add_argument("--learning-rate", type=float, default=0.0001)

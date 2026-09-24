@@ -25,14 +25,33 @@ replay. No model weights, generated data, checkpoints or logs belong in Git.
 
 A full FP32 training checkpoint is about 2.75 GB. The example leaves saved
 states in the configured checkpoint directory so a run can resume.
+The CLI defaults to saving every 5,000 updates and runs no in-loop games;
+evaluate a saved checkpoint with `examples.tetris.evaluate` after training.
+
+The v5e profile used 4 microbatches of 2 rows at 512 tokens and peaked at
+7.75 of 15.75 GiB device memory. For a separate performance comparison,
+`--microbatches 2 --rows 4` keeps 8 decisions per update while cutting the
+number of gradient calls. `--no-remat` keeps block activations for backward
+instead of recomputing them. Use a new run ID and a separate checkpoint root
+for each trial because checkpoints are named by step within that root. Neither
+choice has a measured v5e speedup yet.
+`--fuse-accumulation` combines each later microbatch's gradient with the
+accumulated gradient in one compiled program, removing the separate add
+program. Give this trial its own run ID and checkpoint root too. The v5e
+profile spent about 8.6 ms per update in separate add programs, but fused
+training's actual speed and memory use remain unmeasured.
 
 Training reports first-update time separately from warm update throughput.
+The final `end_to_end_updates_per_second` includes batch preparation,
+checkpoints, gameplay, and profiling export when requested.
 The Colab setup installs `tensorflow-cpu==2.20.0` in the training environment
 and checks its Python profiling hook before training. For an existing environment,
 install that version with `uv pip install --python /path/to/venv/bin/python
 tensorflow-cpu==2.20.0` before capturing a trace.
-For an accelerator trace, add `--profile-dir /absolute/output/path
---profile-updates 30 --max-steps 33 --checkpoint-every 1000 --eval-games 0` to
-a resumed run. The first 3 updates warm the process, then JAX writes a device
-trace covering 30 annotated updates. Choose a new explicit profile directory
-for each run and keep traces outside Git.
+For an accelerator trace, run a separate 4-50 update session with
+`--profile-dir /absolute/output/path --max-steps 30 --checkpoint-every 1000
+--eval-games 0`. JAX starts tracing after the first compiled update and exports
+the native XPlane after the final checkpoint. Every update carries a numbered
+`train` annotation. No profile export interrupts an ongoing training run, and
+the hours-long run uses no profiling flags. Choose a new explicit profile
+directory for each diagnostic run and keep traces outside Git.

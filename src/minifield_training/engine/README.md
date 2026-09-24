@@ -42,11 +42,16 @@ The classifier runner reports the first update's wall time separately because
 it can include compilation. `warm_updates_per_second` divides later committed
 updates by their summed update-call time; it excludes batch construction,
 checkpoints, gameplay and the first update. `last_update_seconds` is the most
-recent update-call time. An optional absolute `profile_dir` and positive
-`profile_updates` capture JAX device traces with `train` step annotations
-after 3 local warm-up updates. The requested bounded run must contain that
-window and no checkpoint boundary may fall inside it. Profiler files stay in
-the caller's configured path.
+recent update-call time. Pass `annotate_steps=True` to label every update with
+its global `train` step number in a JAX trace, including resumed updates.
+The runner never starts or exports a trace. Callers choose the capture window;
+the Tetris example restricts it to a short run and exports after the final
+checkpoint. Profiling output stays in the caller's configured directory.
+
+`step.make_streaming_step(..., fuse_accumulation=True)` combines each later
+physical gradient with the existing sum in one donated JIT program. The
+default keeps gradient and addition separate. The fused path has CPU numerical
+coverage, but its v5e memory peak and speed remain unmeasured.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 

@@ -1,9 +1,6 @@
 """Single-device runner checkpoint, callback, and rejection lifecycle."""
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from contextlib import nullcontext
-import dataclasses
 from pathlib import Path
 
 import jax
@@ -267,33 +264,27 @@ def test_warm_update_rate_excludes_first_compile_and_checkpoints(
     assert messages[2]["warm_updates_per_second"] == 1.0
 
 
-def test_profile_traces_only_bounded_warm_updates(
+def test_step_annotations_leave_profile_capture_to_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The trace starts after 3 updates and ends before the final save."""
-    events: list[str] = []
-    profile_dir = tmp_path / "trace"
+    """Annotate every numbered update without pausing to export a trace."""
+    steps: list[int] = []
 
-    @contextmanager
-    def fake_trace(
-        directory: Path, *, create_perfetto_trace: bool
-    ) -> Iterator[None]:
-        """Record the external profiler's collection boundary."""
-        assert directory == profile_dir
-        assert create_perfetto_trace
-        events.append("start")
-        try:
-            yield
-        finally:
-            events.append("stop")
+    def unexpected_trace(*_args: object, **_kwargs: object) -> None:
+        """Fail if the runner starts or stops profile capture."""
+        raise AssertionError(
+            "The runner must leave profile capture to its caller"
+        )
 
     def fake_annotation(name: str, *, step_num: int) -> object:
-        """Record only numbered train steps within the active trace."""
+        """Record numbered train steps for an external profiler."""
         assert name == "train"
-        events.append(f"step-{step_num}")
+        steps.append(step_num)
         return nullcontext()
 
-    monkeypatch.setattr(jax.profiler, "trace", fake_trace)
+    monkeypatch.setattr(jax.profiler, "trace", unexpected_trace)
+    monkeypatch.setattr(jax.profiler, "start_trace", unexpected_trace)
+    monkeypatch.setattr(jax.profiler, "stop_trace", unexpected_trace)
     monkeypatch.setattr(jax.profiler, "StepTraceAnnotation", fake_annotation)
     inventory = parameters.build_inventory(
         {"weight": (1,)}, format_id="runner/1", decayed_names=frozenset()
@@ -305,33 +296,44 @@ def test_profile_traces_only_bounded_warm_updates(
         LabeledSequence(str(index), "episode", (index + 1,), 0)
         for index in range(5)
     ]
-    config = dataclasses.replace(_config(5), checkpoint_every=10)
     classification_run.run(
         examples,
         initial,
         _update,
         inventory,
-        config,
+        _config(1),
+        checkpoint_root=tmp_path / "default",
+        optimizer_id="optimizer",
+        cursor=training_state.Cursor("run", "data", "source", 0),
+        required_platform="cpu",
+    )
+    assert not steps
+
+    current, cursor = classification_run.run(
+        examples,
+        initial,
+        _update,
+        inventory,
+        _config(5),
         checkpoint_root=tmp_path / "checkpoints",
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
         required_platform="cpu",
-        profile_dir=profile_dir,
-        profile_updates=2,
+        annotate_steps=True,
     )
-    assert events == ["start", "step-4", "step-5", "stop"]
+    assert steps == [1, 2, 3, 4, 5]
+    assert (tmp_path / "checkpoints" / "step-00000004").is_dir()
 
-    with pytest.raises(ValueError, match="checkpoint boundary"):
-        classification_run.run(
-            examples,
-            initial,
-            _update,
-            inventory,
-            _config(5),
-            checkpoint_root=tmp_path / "unused",
-            optimizer_id="optimizer",
-            cursor=training_state.Cursor("run", "data", "source", 0),
-            required_platform="cpu",
-            profile_dir=profile_dir,
-            profile_updates=2,
-        )
+    classification_run.run(
+        examples,
+        current,
+        _update,
+        inventory,
+        _config(2),
+        checkpoint_root=tmp_path / "checkpoints",
+        optimizer_id="optimizer",
+        cursor=cursor,
+        required_platform="cpu",
+        annotate_steps=True,
+    )
+    assert steps == [1, 2, 3, 4, 5, 6, 7]

@@ -7,6 +7,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import NDArray
 
 from minifield_training.core import parameters as core_parameters
 from minifield_training.kernels import types
@@ -19,11 +20,12 @@ type LossTerms = Callable[
 type LogicalStep = Callable[
     [state.State, types.DeviceBatch, jax.Array], adamw.CommitResult
 ]
+type Accumulation = tuple[jax.Array, jax.Array, types.Parameters, jax.Array]
 
 
 @dataclass(frozen=True)
 class StreamingStep:
-    """Compile one physical gradient and the commit as separate programs.
+    """Compile physical gradients and the commit as separate programs.
 
     The host only selects active slots. Gradients, sums, normalization, and
     the transactional update stay on device, with one commit per logical step.
@@ -42,12 +44,18 @@ class StreamingStep:
         adamw.CommitResult,
     ]
     inventory: core_parameters.FullParameterInventory
+    accumulate: (
+        Callable[
+            [types.Parameters, types.DeviceBatch, Accumulation], Accumulation
+        ]
+        | None
+    ) = None
 
     def __call__(
         self,
         full_state: state.State,
         microbatches: types.DeviceBatch,
-        active: jax.Array,
+        active: NDArray[np.bool_] | jax.Array,
     ) -> adamw.CommitResult:
         """Sum active decision gradients, then attempt one donated commit."""
         adamw.validate_full_weight_state_structure(full_state, self.inventory)
@@ -59,22 +67,27 @@ class StreamingStep:
         ):
             raise ValueError("microbatches need a common leading axis")
         enabled = np.asarray(active)
-        total: (
-            tuple[jax.Array, jax.Array, types.Parameters, jax.Array] | None
-        ) = None
+        total: Accumulation | None = None
         for index in np.flatnonzero(enabled):
             batch = {
                 name: value[int(index)] for name, value in microbatches.items()
             }
-            loss, count, gradients = self.gradient(full_state["params"], batch)
             if total is None:
+                loss, count, gradients = self.gradient(
+                    full_state["params"], batch
+                )
                 total = (
                     loss,
                     count,
                     gradients,
                     jnp.isfinite(count) & (count >= 0),
                 )
+            elif self.accumulate is not None:
+                total = self.accumulate(full_state["params"], batch, total)
             else:
+                loss, count, gradients = self.gradient(
+                    full_state["params"], batch
+                )
                 old_loss, old_count, old_gradients, counts_valid = total
                 total = (
                     old_loss + loss,
@@ -106,8 +119,15 @@ def make_streaming_step(
     loss_terms: LossTerms,
     inventory: core_parameters.FullParameterInventory,
     config: adamw.AdamWConfig,
+    *,
+    fuse_accumulation: bool = False,
 ) -> StreamingStep:
-    """Build bounded-memory full-weight accumulation for a single device."""
+    """Build single-device accumulation with an optional fused gradient sum.
+
+    Fusing later physical gradients with their previous sums needs device
+    memory for both the reverse pass and the carried gradients. Keep it opt-in
+    until target-device peak memory and throughput are measured.
+    """
     if not inventory.trainable_names:
         raise ValueError("Logical updates need a trainable parameter")
     trainable_names = inventory.trainable_names
@@ -156,12 +176,31 @@ def make_streaming_step(
             jax.tree.map(lambda value: value / denominator, gradients),
         )
 
+    def accumulate(
+        parameters: types.Parameters,
+        batch: types.DeviceBatch,
+        previous: Accumulation,
+    ) -> Accumulation:
+        """Differentiate and add one later slot in the same JIT program."""
+        loss, count, gradients = gradient(parameters, batch)
+        old_loss, old_count, old_gradients, counts_valid = previous
+        return (
+            old_loss + loss,
+            old_count + count,
+            cast(
+                types.Parameters,
+                jax.tree.map(jnp.add, old_gradients, gradients),
+            ),
+            counts_valid & jnp.isfinite(count) & (count >= 0),
+        )
+
     return StreamingStep(
         jax.jit(gradient),
         jax.jit(add, donate_argnums=(0,)),
         jax.jit(normalize, donate_argnums=(0,)),
         adamw.make_donated_transaction(inventory, config),
         inventory,
+        jax.jit(accumulate, donate_argnums=(2,)) if fuse_accumulation else None,
     )
 
 

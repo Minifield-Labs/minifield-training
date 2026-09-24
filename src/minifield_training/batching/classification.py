@@ -4,9 +4,9 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 import math
 
-import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import NDArray
 
 from minifield_training.datasets.labeled import LabeledSequence
 from minifield_training.kernels.types import DeviceBatch
@@ -17,7 +17,7 @@ class PhysicalUpdate:
     """One logical update and its real source-record IDs."""
 
     microbatches: DeviceBatch
-    active: jax.Array
+    active: NDArray[np.bool_]
     example_ids: tuple[str, ...]
 
 
@@ -103,6 +103,6 @@ def iter_updates(
                 "labels": jnp.asarray(labels),
                 "valid_rows": jnp.asarray(valid_rows),
             },
-            jnp.asarray(active),
+            active,
             tuple(names),
         )

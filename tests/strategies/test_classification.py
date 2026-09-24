@@ -65,3 +65,55 @@ def test_only_head_is_new_and_embeddings_stay_frozen() -> None:
             dtype=jnp.float32,
         )[0]
     ) in (0, 1)
+
+
+def test_streaming_classifier_accepts_plain_block_autodiff() -> None:
+    """The strategy threads the plain-block policy to its gradient program."""
+    cfg = model.Config(4, 8, 1, 1, 8, ("conv",))
+    rng = np.random.default_rng(8)
+    backbone = {
+        name: jnp.asarray(rng.normal(0, 0.1, shape), dtype=jnp.float32)
+        for name, shape in model.expected_shapes(cfg).items()
+    }
+    allowed = (True, True, False)
+    parameters = classification.initialize_from_backbone(
+        backbone, cfg, allowed, head_seed=6
+    )
+    inventory = classification.parameter_inventory(cfg, allowed)
+    batch = {
+        "input_ids": jnp.asarray([[1, 2, 3]], dtype=jnp.int32),
+        "attention_mask": jnp.asarray([[1, 1, 1]], dtype=jnp.int32),
+        "labels": jnp.asarray([1], dtype=jnp.int32),
+        "valid_rows": jnp.asarray([True]),
+    }
+    optimizer = adamw.AdamWConfig(0.01)
+    checkpointed = classification.make_lfm2_5_streaming_step(
+        cfg, allowed, inventory, optimizer, dtype=jnp.float32
+    )
+    plain = classification.make_lfm2_5_streaming_step(
+        cfg,
+        allowed,
+        inventory,
+        optimizer,
+        dtype=jnp.float32,
+        rematerialize_blocks=False,
+    )
+    fused = classification.make_lfm2_5_streaming_step(
+        cfg,
+        allowed,
+        inventory,
+        optimizer,
+        dtype=jnp.float32,
+        fuse_accumulation=True,
+    )
+    assert checkpointed.accumulate is None
+    assert fused.accumulate is not None
+    old_loss, old_count, old_gradient = checkpointed.gradient(parameters, batch)
+    new_loss, new_count, new_gradient = plain.gradient(parameters, batch)
+    np.testing.assert_array_equal(old_loss, new_loss)
+    np.testing.assert_array_equal(old_count, new_count)
+    assert old_gradient.keys() == new_gradient.keys()
+    for name in old_gradient:
+        np.testing.assert_allclose(
+            old_gradient[name], new_gradient[name], rtol=1e-6, atol=1e-6
+        )
