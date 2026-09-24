@@ -13,6 +13,8 @@ Adam moments, the int32 step, and a JSON manifest. `load` verifies the file
 hash, inventory, optimizer configuration, run, data, and source identities and
 returns the next unread batch cursor. A warm start loads pretrained tensors and
 initializes fresh moments; a resume loads all saved tensors and the cursor.
+The writer makes each host tensor contiguous before safetensors serialization,
+including strided accelerator transfers such as convolution weights.
 Checkpoint paths must be on persistent storage when used in Colab. The caller
 chooses storage and never overwrites an existing checkpoint directory.
 
