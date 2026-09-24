@@ -38,6 +38,16 @@ scanned JIT path.
 The donated optimizer consumes its input buffers, including on a rejected
 commit. Continue from the returned `CommitResult.state` in either case.
 
+The classifier runner reports the first update's wall time separately because
+it can include compilation. `warm_updates_per_second` divides later committed
+updates by their summed update-call time; it excludes batch construction,
+checkpoints, gameplay and the first update. `last_update_seconds` is the most
+recent update-call time. An optional absolute `profile_dir` and positive
+`profile_updates` capture JAX device traces with `train` step annotations
+after 3 local warm-up updates. The requested bounded run must contain that
+window and no checkpoint boundary may fall inside it. Profiler files stay in
+the caller's configured path.
+
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
 `classification_run.run` is the bounded single-device host lifecycle for

@@ -1,6 +1,8 @@
 """Bounded single-device lifecycle for hard-label sequence updates."""
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
+from contextlib import nullcontext
 import dataclasses
 import math
 from pathlib import Path
@@ -18,6 +20,9 @@ from minifield_training.optimizers import state
 
 type Evaluator = Callable[[state.State, int], Mapping[str, float]]
 type Reporter = Callable[[dict[str, float | str]], None]
+
+_PROFILE_WARMUP_UPDATES = 3
+_now: Callable[[], float] = time.monotonic
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,6 +81,62 @@ def require_single_device(platform: str | None = None) -> jax.Device:
     return devices[0]
 
 
+def _check_profile_window(
+    config: RunConfig,
+    cursor: training_state.Cursor,
+    profile_dir: Path | None,
+    profile_updates: int,
+) -> None:
+    """Keep a requested trace bounded and clear of checkpoint work."""
+    if profile_dir is None:
+        if profile_updates:
+            raise ValueError("Profiling needs an explicit output directory")
+        return
+    if (
+        not profile_dir.is_absolute()
+        or profile_updates < 1
+        or config.max_steps is None
+        or config.max_steps < _PROFILE_WARMUP_UPDATES + profile_updates
+        or config.max_seconds is not None
+    ):
+        raise ValueError("Profiling needs a bounded warm-update window")
+    first_traced = cursor.next_batch + _PROFILE_WARMUP_UPDATES + 1
+    last_traced = cursor.next_batch + _PROFILE_WARMUP_UPDATES + profile_updates
+    next_checkpoint = (
+        (first_traced + config.checkpoint_every - 1)
+        // config.checkpoint_every
+        * config.checkpoint_every
+    )
+    if next_checkpoint <= last_traced:
+        raise ValueError("Profile window crosses a checkpoint boundary")
+
+
+def _save_and_evaluate(
+    current: state.State,
+    cursor: training_state.Cursor,
+    inventory: core_parameters.FullParameterInventory,
+    checkpoint_root: Path,
+    optimizer_id: str,
+    evaluate: Evaluator | None,
+    report: Reporter | None,
+) -> None:
+    """Publish a complete checkpoint before optional gameplay."""
+    destination = checkpoint_root / f"step-{cursor.next_batch:08d}"
+    training_state.save(
+        destination,
+        current,
+        inventory,
+        optimizer_id=optimizer_id,
+        cursor=cursor,
+    )
+    if report is not None:
+        report({"checkpoint": str(destination)})
+    if evaluate is not None:
+        metrics = evaluate(current, cursor.next_batch)
+        if report is not None:
+            report({"step": float(cursor.next_batch), **metrics})
+
+
 def run(
     examples: Sequence[LabeledSequence],
     initial_state: state.State,
@@ -89,6 +150,8 @@ def run(
     evaluate: Evaluator | None = None,
     report: Reporter | None = None,
     required_platform: str | None = None,
+    profile_dir: Path | None = None,
+    profile_updates: int = 0,
 ) -> tuple[state.State, training_state.Cursor]:
     """Compile and run bounded updates, saving after committed boundaries.
 
@@ -97,104 +160,154 @@ def run(
     The caller provides persistent checkpoint storage and optional gameplay
     evaluation, so this loop contains no product-specific behavior.
     """
-    require_single_device(required_platform)
+    device = require_single_device(required_platform)
     if not examples:
         raise ValueError("Classification run requires labeled examples")
     adamw.validate_full_weight_state(initial_state, inventory)
     if int(initial_state["step"]) != cursor.next_batch:
         raise ValueError("Optimizer step and data cursor disagree")
+    _check_profile_window(config, cursor, profile_dir, profile_updates)
     capacity = config.microbatches * config.rows_per_microbatch
     updates_per_epoch = math.ceil(len(examples) / capacity)
     compiled = (
         update if isinstance(update, step.StreamingStep) else jax.jit(update)
     )
-    current = initial_state
-    started = time.monotonic()
+    # Loaded arrays may be physically on this device but uncommitted. The
+    # first JIT result is committed; starting committed keeps one compilation
+    # signature across the warm-start and resumed updates.
+    current = jax.device_put(initial_state, device)
+    started = _now()
     committed = 0
+    warm_seconds = 0.0
+    warm_updates = 0
+    traced_updates = 0
+    tracing = False
     last_saved = -1
-    while True:
-        if config.max_steps is not None and committed >= config.max_steps:
-            break
-        if (
-            config.max_seconds is not None
-            and committed > 0
-            and time.monotonic() - started >= config.max_seconds
-        ):
-            break
-        epoch, offset = divmod(cursor.next_batch, updates_per_epoch)
-        batches = batching.iter_updates(
-            examples,
-            microbatches=config.microbatches,
-            rows_per_microbatch=config.rows_per_microbatch,
-            sequence_length=config.sequence_length,
-            pad_token_id=config.pad_token_id,
-            vocab_size=config.vocab_size,
-            allowed_classes=config.allowed_classes,
-            padding_label=config.padding_label,
-            seed=config.seed + epoch,
-            start_update=offset,
-        )
-        for batch in batches:
-            result = compiled(current, batch.microbatches, batch.active)
-            if not bool(result.committed):
-                raise RuntimeError(
-                    f"Classification update rejected, code={int(result.code)}"
-                )
-            current = result.state
-            cursor = dataclasses.replace(
-                cursor, next_batch=cursor.next_batch + 1
-            )
-            committed += 1
-            if report is not None and committed % config.report_every == 0:
-                elapsed = max(time.monotonic() - started, 1e-9)
-                report(
-                    {
-                        "step": float(cursor.next_batch),
-                        "loss": float(result.loss),
-                        "updates_per_second": committed / elapsed,
-                    }
-                )
-            if cursor.next_batch % config.checkpoint_every == 0:
-                destination = checkpoint_root / f"step-{cursor.next_batch:08d}"
-                training_state.save(
-                    destination,
-                    current,
-                    inventory,
-                    optimizer_id=optimizer_id,
-                    cursor=cursor,
-                )
-                last_saved = cursor.next_batch
-                if report is not None:
-                    report({"checkpoint": str(destination)})
-                if evaluate is not None:
-                    metrics = evaluate(current, cursor.next_batch)
-                    if report is not None:
-                        report({"step": float(cursor.next_batch), **metrics})
+    with ExitStack() as profile_stack:
+        while True:
             if config.max_steps is not None and committed >= config.max_steps:
                 break
             if (
                 config.max_seconds is not None
-                and time.monotonic() - started >= config.max_seconds
+                and committed > 0
+                and _now() - started >= config.max_seconds
             ):
                 break
-        if (config.max_steps is not None and committed >= config.max_steps) or (
-            config.max_seconds is not None
-            and time.monotonic() - started >= config.max_seconds
-        ):
-            break
+            epoch, offset = divmod(cursor.next_batch, updates_per_epoch)
+            batches = batching.iter_updates(
+                examples,
+                microbatches=config.microbatches,
+                rows_per_microbatch=config.rows_per_microbatch,
+                sequence_length=config.sequence_length,
+                pad_token_id=config.pad_token_id,
+                vocab_size=config.vocab_size,
+                allowed_classes=config.allowed_classes,
+                padding_label=config.padding_label,
+                seed=config.seed + epoch,
+                start_update=offset,
+            )
+            for batch in batches:
+                if (
+                    profile_dir is not None
+                    and committed == _PROFILE_WARMUP_UPDATES
+                    and not tracing
+                    and not traced_updates
+                ):
+                    profile_stack.enter_context(
+                        jax.profiler.trace(
+                            profile_dir, create_perfetto_trace=True
+                        )
+                    )
+                    tracing = True
+                update_started = _now()
+                annotation = (
+                    jax.profiler.StepTraceAnnotation(
+                        "train", step_num=cursor.next_batch + 1
+                    )
+                    if tracing
+                    else nullcontext()
+                )
+                with annotation:
+                    result = compiled(current, batch.microbatches, batch.active)
+                    accepted = bool(result.committed)
+                update_seconds = _now() - update_started
+                if not accepted:
+                    code = int(result.code)
+                    raise RuntimeError(
+                        f"Classification update rejected, code={code}"
+                    )
+                current = result.state
+                cursor = dataclasses.replace(
+                    cursor, next_batch=cursor.next_batch + 1
+                )
+                committed += 1
+                if committed == 1:
+                    if report is not None:
+                        report(
+                            {
+                                "step": float(cursor.next_batch),
+                                "first_update_seconds": update_seconds,
+                            }
+                        )
+                else:
+                    warm_seconds += update_seconds
+                    warm_updates += 1
+                if tracing:
+                    traced_updates += 1
+                    if traced_updates == profile_updates:
+                        profile_stack.close()
+                        tracing = False
+                        if report is not None and profile_dir is not None:
+                            report({"profile": str(profile_dir)})
+                if report is not None and committed % config.report_every == 0:
+                    report(
+                        {
+                            "step": float(cursor.next_batch),
+                            "loss": float(result.loss),
+                            "last_update_seconds": update_seconds,
+                            "warm_updates_per_second": (
+                                warm_updates / warm_seconds
+                                if warm_seconds > 0
+                                else 0.0
+                            ),
+                        }
+                    )
+                if cursor.next_batch % config.checkpoint_every == 0:
+                    _save_and_evaluate(
+                        current,
+                        cursor,
+                        inventory,
+                        checkpoint_root,
+                        optimizer_id,
+                        evaluate,
+                        report,
+                    )
+                    last_saved = cursor.next_batch
+                if (
+                    config.max_steps is not None
+                    and committed >= config.max_steps
+                ):
+                    break
+                if (
+                    config.max_seconds is not None
+                    and _now() - started >= config.max_seconds
+                ):
+                    break
+            if (
+                config.max_steps is not None and committed >= config.max_steps
+            ) or (
+                config.max_seconds is not None
+                and _now() - started >= config.max_seconds
+            ):
+                break
     if last_saved != cursor.next_batch:
-        destination = checkpoint_root / f"step-{cursor.next_batch:08d}"
-        training_state.save(
-            destination,
+        _save_and_evaluate(
             current,
+            cursor,
             inventory,
-            optimizer_id=optimizer_id,
-            cursor=cursor,
+            checkpoint_root,
+            optimizer_id,
+            evaluate,
+            report,
         )
-        if report is not None:
-            report({"checkpoint": str(destination)})
-        if evaluate is not None:
-            metrics = evaluate(current, cursor.next_batch)
-            if report is not None:
-                report({"step": float(cursor.next_batch), **metrics})
     return current, cursor

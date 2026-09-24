@@ -25,3 +25,10 @@ replay. No model weights, generated data, checkpoints or logs belong in Git.
 
 A full FP32 training checkpoint is about 2.75 GB. The example leaves saved
 states in the configured checkpoint directory so a run can resume.
+
+Training reports first-update time separately from warm update throughput.
+For an accelerator trace, add `--profile-dir /absolute/output/path
+--profile-updates 30 --max-steps 33 --checkpoint-every 1000 --eval-games 0` to
+a resumed run. The first 3 updates warm the process, then JAX writes a device
+trace covering 30 annotated updates. Choose a new explicit profile directory
+for each run and keep traces outside Git.

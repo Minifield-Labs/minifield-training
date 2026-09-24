@@ -215,6 +215,8 @@ def main() -> None:
     parser.add_argument("--eval-games", type=int, default=2)
     parser.add_argument("--eval-max-ticks", type=int, default=2000)
     parser.add_argument("--eval-seed", type=int, default=900)
+    parser.add_argument("--profile-dir", type=Path)
+    parser.add_argument("--profile-updates", type=int, default=0)
     args = parser.parse_args()
     if not args.checkpoint_root.is_absolute():
         raise ValueError("Checkpoint root must be an explicit absolute path")
@@ -321,6 +323,8 @@ def main() -> None:
         evaluate=evaluator,
         report=report,
         required_platform=args.platform,
+        profile_dir=args.profile_dir,
+        profile_updates=args.profile_updates,
     )
 
 
