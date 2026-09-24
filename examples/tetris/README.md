@@ -27,6 +27,10 @@ A full FP32 training checkpoint is about 2.75 GB. The example leaves saved
 states in the configured checkpoint directory so a run can resume.
 
 Training reports first-update time separately from warm update throughput.
+The Colab setup installs `tensorflow-cpu==2.20.0` in the training environment
+and checks its Python profiling hook before training. For an existing environment,
+install that version with `uv pip install --python /path/to/venv/bin/python
+tensorflow-cpu==2.20.0` before capturing a trace.
 For an accelerator trace, add `--profile-dir /absolute/output/path
 --profile-updates 30 --max-steps 33 --checkpoint-every 1000 --eval-games 0` to
 a resumed run. The first 3 updates warm the process, then JAX writes a device
