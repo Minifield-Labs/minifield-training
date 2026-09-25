@@ -1,4 +1,4 @@
-"""Bounded single-device lifecycle over caller-supplied batch strategies."""
+"""Bounded single-host lifecycle over caller-supplied batch strategies."""
 
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
@@ -49,18 +49,44 @@ class RunConfig:
 
 def require_single_device(platform: str | None = None) -> jax.Device:
     """Require exactly one device, optionally enforcing its platform."""
+    return require_devices(1, platform)[0]
+
+
+def require_devices(
+    count: int, platform: str | None = None
+) -> tuple[jax.Device, ...]:
+    """Require an exact visible device count on one host, without fallback."""
+    if count < 1:
+        raise ValueError("Device count must be positive")
     devices = jax.devices()
     if (
-        len(devices) != 1
+        jax.process_count() != 1
+        or len(devices) != count
         or platform is not None
-        and devices[0].platform != platform
+        and any(device.platform != platform for device in devices)
     ):
         label = platform if platform is not None else "local"
+        quantity = "one" if count == 1 else str(count)
         raise RuntimeError(
-            f"Expected one {label} device, found "
+            f"Expected {quantity} {label} device(s) on one host, found "
             f"{[(device.platform, device.id) for device in devices]}"
         )
-    return devices[0]
+    return tuple(devices)
+
+
+def _state_placement(
+    update: step.LogicalStep | step.StreamingStep, platform: str | None
+) -> jax.Device | jax.sharding.NamedSharding:
+    """Admit the step's device topology and place one logical state."""
+    mesh = update.mesh if isinstance(update, step.StreamingStep) else None
+    if mesh is None:
+        return require_single_device(platform)
+    devices = require_devices(mesh.size, platform)
+    if set(mesh.devices.flat) != set(devices):
+        raise ValueError("Training mesh must contain all visible devices")
+    # JAX 0.7.2's PartitionSpec constructor has no type annotations.
+    replicated = jax.sharding.PartitionSpec()  # type: ignore[no-untyped-call]
+    return jax.sharding.NamedSharding(mesh, replicated)
 
 
 def _save_and_evaluate(
@@ -141,7 +167,7 @@ def run[RecordT](
     one logical update's arrays are transferred at a time. The caller provides
     persistent checkpoints and optional gameplay evaluation.
     """
-    device = require_single_device(required_platform)
+    placement = _state_placement(update, required_platform)
     updates_per_epoch = _epoch_update_count(
         examples, batch_strategy, batch_source
     )
@@ -154,7 +180,7 @@ def run[RecordT](
     # Loaded arrays may be physically on this device but uncommitted. The
     # first JIT result is committed; starting committed keeps one compilation
     # signature across the warm-start and resumed updates.
-    current = jax.device_put(initial_state, device)
+    current = jax.device_put(initial_state, placement)
     started = _now()
     deadline = started + config.max_seconds if config.max_seconds else None
     committed = 0

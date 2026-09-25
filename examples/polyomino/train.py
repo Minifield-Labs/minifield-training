@@ -1,4 +1,4 @@
-"""Warm-start or resume the Base polyomino decision classifier on one device."""
+"""Warm-start or resume the Base polyomino classifier on one host."""
 
 import argparse
 from collections.abc import Mapping
@@ -67,6 +67,8 @@ def source_identity(
         settings["rematerialize_blocks"] = False
     if args.fuse_accumulation:
         settings["fuse_accumulation"] = True
+    if args.devices > 1:
+        settings["data_parallel_devices"] = args.devices
     return hashlib.sha256(json_io.canonical(settings).encode()).hexdigest()
 
 
@@ -171,9 +173,15 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-hours", type=float)
     parser.add_argument("--platform", choices=("tpu", "cpu"), default="tpu")
+    parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--sequence-length", type=int, default=512)
     parser.add_argument("--microbatches", type=int, default=4)
-    parser.add_argument("--rows", type=int, default=2)
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=2,
+        help="Global rows per microbatch; must divide evenly across devices",
+    )
     parser.add_argument("--data-seed", type=int, default=17)
     parser.add_argument("--head-seed", type=int, default=6)
     parser.add_argument("--no-remat", action="store_true")
@@ -196,7 +204,14 @@ def main() -> None:
         or args.max_hours is not None
     ):
         raise ValueError("Profiling needs a separate 4-50 update run")
-    training_run.require_single_device(args.platform)
+    devices = training_run.require_devices(args.devices, args.platform)
+    if args.rows < 1 or args.rows % args.devices:
+        raise ValueError("Global rows must be divisible by device count")
+    mesh = (
+        jax.sharding.Mesh(np.asarray(devices), ("data",))
+        if args.devices > 1
+        else None
+    )
     cfg, tokenizer = load_model_metadata(args.model_dir)
     data_sha256 = source.data_identity()
     data = source.load_decisions(args.dataset_cache)
@@ -252,6 +267,7 @@ def main() -> None:
         attention_backend="dense",
         rematerialize_blocks=not args.no_remat,
         fuse_accumulation=args.fuse_accumulation,
+        mesh=mesh,
     )
     batch_strategy = dense.DenseBatchStrategy(
         batch_contracts.BatchShape(
@@ -326,6 +342,9 @@ def main() -> None:
             "step": float(cursor.next_batch),
             "microbatches": float(args.microbatches),
             "rows": float(args.rows),
+            "devices": float(args.devices),
+            "rows_per_device": args.rows / args.devices,
+            "decisions_per_update": float(args.microbatches * args.rows),
             "sequence_length": float(args.sequence_length),
             "rematerialize_blocks": float(not args.no_remat),
             "fuse_accumulation": float(args.fuse_accumulation),

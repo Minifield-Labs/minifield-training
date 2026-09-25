@@ -48,6 +48,9 @@ def make_evaluator(
         full_state: optimizer_state.State, step: int
     ) -> dict[str, float]:
         """Run until each seeded game dies or hits its explicit tick cap."""
+        # Gameplay batches can be smaller than the training mesh. Score them
+        # on one device, using one copy of the replicated training parameters.
+        params = jax.device_put(full_state["params"], jax.local_devices()[0])
         states = [engine.Game(seed + index) for index in range(games)]
         active = np.ones(games, dtype=np.bool_)
         frames: list[str] = []
@@ -69,9 +72,7 @@ def make_evaluator(
                 ids[index, : len(row)] = row
                 masks[index, : len(row)] = 1
             actions = np.asarray(
-                action_fn(
-                    full_state["params"], jnp.asarray(ids), jnp.asarray(masks)
-                )
+                action_fn(params, jnp.asarray(ids), jnp.asarray(masks))
             )
             for index, game in enumerate(states):
                 if not active[index]:
@@ -121,6 +122,12 @@ def main() -> None:
     parser.add_argument("--fuse-accumulation", action="store_true")
     parser.add_argument("--microbatches", type=int, default=4)
     parser.add_argument("--rows", type=int, default=2)
+    parser.add_argument(
+        "--devices",
+        type=int,
+        default=1,
+        help="Training device count for checkpoint identity; scoring uses one",
+    )
     parser.add_argument("--learning-rate", type=float, default=0.0001)
     args = parser.parse_args()
     cfg, tokenizer = train.load_model_metadata(args.model_dir)

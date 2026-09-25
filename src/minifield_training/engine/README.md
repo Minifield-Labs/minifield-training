@@ -55,18 +55,39 @@ coverage, but its v5e memory peak and speed remain unmeasured.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
-`training_run.run` is the bounded single-device host lifecycle for
+`training_run.run` is the bounded single-host lifecycle for
 caller-supplied supervision. It JIT-compiles a scanned logical update or calls
 the already compiled stages of a streaming update,
 consumes physical updates through batching protocols, checkpoints the complete
 state after committed updates, and resumes deterministic epoch shuffles from
 the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each
 invocation. An optional callback runs at checkpoint boundaries for product
-gameplay; its metrics and a report callback are caller-owned. A requested TPU
-must be the sole visible JAX device or startup fails clearly. The caller
+gameplay; its metrics and a report callback are caller-owned. The default
+requires one visible device; a streaming step's optional mesh must contain
+all visible devices on one host. A requested platform must match every device.
+The caller
 supplies an explicit persistent checkpoint path. CPU tests cover save/restore,
 cursor advance, callback boundaries, and TPU absence. TPU compilation,
 throughput, and full-model gameplay remain unverified here.
+
+`step.make_streaming_step(..., mesh=mesh)` accepts a one-dimensional mesh
+named `data`. Every physical batch array has a leading global row dimension
+divisible by the device count. `jax.shard_map` splits rows, differentiates
+replica-local parameters, and sums loss, count, and gradients across devices.
+The explicit `pvary` before differentiation avoids VMA autodiff performing
+another gradient reduction. Invalid counts on any replica reject the complete
+update. Normalization and AdamW still happen once per logical update. Masters,
+moments, and scalar step remain fully replicated with their original logical
+shapes, so checkpoints retain the existing format. Direct callers must place
+state on the replicated mesh; `training_run.run` does this at startup/restore.
+
+`tests/engine/test_data_parallel.py` launches a fresh process with 8 CPU
+devices. It checks analytical loss/Adam values, uneven padding, empty and
+invalid counts, frozen leaves, fused accumulation, all replica copies, and
+saved-next-update equivalence. Tiny conv/attention classification gradients
+are compared with the single-device implementation using FP32 (1e-6 relative
+L2 error per leaf) and BF16 (2.5%) computation, both with FP32 masters.
+These checks don't qualify TPU compilation, memory, or throughput.
 
 For finite records, supply `examples` and a `batch_strategy` implementing
 `batching.contracts.BatchStrategy[RecordT]`. The runner owns epoch seeds and the
