@@ -55,11 +55,23 @@ The 8-device CPU tests cover gradient reduction and checkpoint restore;
 the full pretrained v5e-8 run remains unqualified until its hardware smoke.
 
 The separate [v5e-8 notebook](../colab_polyomino_classifier_tpu_v5e_8.ipynb)
-uses those settings, verifies 8 local TPUs, and keeps the original notebook
-unchanged. It pins the trainer source, verifies a 2-update checkpoint, then
-offers resumed training bounded by 3 hours and the remaining dataset updates.
-Changing its recipe requires a fresh checkpoint directory. Evaluation receives
-the same training settings when admitting a saved checkpoint.
+uses those settings and verifies 8 local TPUs. It now runs on Kaggle or Colab
+and has an optional QAT mode. Attach an existing full dense training checkpoint
+under `/kaggle/input`, then set `TRAINING_MODE = "qat"`, choose `nf4` or
+`ternary`, and set `DENSE_CHECKPOINT_DIR` to its directory. The notebook reads
+the prior manifest's run and source identities, admits either full-state
+tensor filename, and starts a new QAT optimizer and cursor. It verifies a
+2-update QAT checkpoint before gameplay, then offers bounded training with
+strict QAT resume. The source checkpoint is never modified. Its config and
+tokenizer still come from the pinned Base release; QAT doesn't download the
+unused Base weights.
+
+Kaggle scratch files go under `/kaggle/temp`; set `PERSISTENT_ROOT` to
+`/kaggle/working` for the long run, then save or download those outputs before
+the session ends. On Colab, mount persistent storage. Changing the recipe or
+source checkpoint requires a fresh QAT output directory. These paths haven't
+been run on TPU hardware yet; the notebook's smoke is the first qualification
+step for a selected v5e-8 host.
 
 The pinned commit must be available on GitHub or in a source bundle. To run
 from a local branch, create a bundle from this checkout and upload it to
@@ -102,8 +114,8 @@ asset holds effective FP32 tensors with `format=pt` and provenance metadata;
 it isn't a small packed file or a complete runtime bundle. A consumer must
 pair it with a compatible config declaring `dtype=float32` and the tokenizer.
 Packed mixed-precision delivery, including dense embeddings, needs a future
-runtime per-tensor format. Existing notebooks retain their pinned training
-recipe until hardware qualification is available.
+runtime per-tensor format. The notebook's default recipe stays dense; its
+optional QAT path needs the hardware smoke before any TPU claim.
 
 For a prior dense checkpoint trained with different batch or device settings,
 pass its manifest `cursor.source_id` as `--warm-start-source-id`. If that
