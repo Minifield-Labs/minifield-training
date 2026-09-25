@@ -53,3 +53,22 @@ resume with a different recipe. Pass the same `--devices`, `--rows`, and
 scores on one device, including when invoked after a distributed checkpoint.
 The 8-device CPU tests cover gradient reduction and checkpoint restore;
 the full pretrained v5e-8 run remains unqualified until its hardware smoke.
+
+The separate [v5e-8 notebook](../colab_polyomino_classifier_tpu_v5e_8.ipynb)
+uses those settings, verifies 8 local TPUs, and keeps the original notebook
+unchanged. It pins the trainer source, verifies a 2-update checkpoint, then
+offers resumed training bounded by 3 hours and the remaining dataset updates.
+Changing its recipe requires a fresh checkpoint directory. Evaluation receives
+the same training settings when admitting a saved checkpoint.
+
+The pinned commit must be available on GitHub or in a source bundle. To run
+from a local branch, create a bundle from this checkout and upload it to
+`/content/minifield-training-tpu-v5e-8.bundle` in the notebook runtime:
+
+```sh
+git bundle create /tmp/minifield-training-tpu-v5e-8.bundle HEAD
+```
+
+The notebook automatically clones the uploaded bundle when present, verifies
+its exact source revision, and still downloads pinned model and dataset files
+from Hugging Face. Bundles and training outputs stay outside Git.
