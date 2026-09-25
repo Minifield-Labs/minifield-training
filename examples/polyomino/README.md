@@ -104,3 +104,10 @@ pair it with a compatible config declaring `dtype=float32` and the tokenizer.
 Packed mixed-precision delivery, including dense embeddings, needs a future
 runtime per-tensor format. Existing notebooks retain their pinned training
 recipe until hardware qualification is available.
+
+For a prior dense checkpoint trained with different batch or device settings,
+pass its manifest `cursor.source_id` as `--warm-start-source-id`. If that
+checkpoint stores its full `params`, `m`, `v`, and `step` tensors in
+`model.safetensors`, pass `--warm-start-tensor-file model.safetensors`.
+The manifest hash and full inventory are still checked. Exact resume always
+uses the normal `state.safetensors` file and the QAT run's new identity.

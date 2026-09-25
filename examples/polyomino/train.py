@@ -81,6 +81,18 @@ def source_identity(
     return hashlib.sha256(json_io.canonical(settings).encode()).hexdigest()
 
 
+def warm_start_source_identity(
+    args: argparse.Namespace, cfg: model.Config, *, sequence_length: int
+) -> str:
+    """Use a prior dense source identity when its batch topology differs."""
+    previous = args.warm_start_source_id
+    if previous is not None:
+        if not previous:
+            raise ValueError("Warm-start source identity cannot be empty")
+        return str(previous)
+    return source_identity(args, cfg, sequence_length=sequence_length)
+
+
 def quantization_strategy(
     cfg: model.Config, kind: str
 ) -> quantization.NamedQuantization | None:
@@ -198,6 +210,12 @@ def main(
     resume.add_argument("--resume-latest", action="store_true")
     resume.add_argument("--warm-start-checkpoint", type=Path)
     parser.add_argument("--warm-start-run-id")
+    parser.add_argument("--warm-start-source-id")
+    parser.add_argument(
+        "--warm-start-tensor-file",
+        choices=("state.safetensors", "model.safetensors"),
+        default="state.safetensors",
+    )
     parser.add_argument("--skip-if-resumed", action="store_true")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-hours", type=float)
@@ -228,6 +246,11 @@ def main(
     parser.add_argument("--eval-seed", type=int, default=1 << 31)
     parser.add_argument("--profile-dir", type=Path)
     args = parser.parse_args()
+    if (
+        args.warm_start_source_id is not None
+        and args.warm_start_checkpoint is None
+    ):
+        raise ValueError("Warm-start source ID requires a checkpoint")
     if not args.checkpoint_root.is_absolute():
         raise ValueError("Checkpoint root must be an explicit absolute path")
     if args.profile_dir is not None and (
@@ -278,9 +301,10 @@ def main(
             dense_inventory,
             run_id=args.warm_start_run_id,
             data_sha256=data_sha256,
-            source_id=source_identity(
+            source_id=warm_start_source_identity(
                 args, cfg, sequence_length=args.sequence_length
             ),
+            tensor_filename=args.warm_start_tensor_file,
         )
         full_state = adamw.initialize_state(dense_masters, inventory)
         cursor = training_state.Cursor(args.run_id, data_sha256, source_id, 0)

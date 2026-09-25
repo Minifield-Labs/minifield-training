@@ -16,6 +16,11 @@ initializes fresh moments; a resume loads all saved tensors and the cursor.
 The writer makes each host tensor contiguous before safetensors serialization,
 including strided accelerator transfers such as convolution weights, while
 preserving scalar shapes.
+`load_warm_start_masters` can explicitly admit a full-state tensor file named
+`model.safetensors` when a prior checkpoint used that filename. It verifies
+the same manifest hash, exact tensor inventory, and cursor identities before
+returning only FP32 masters. Ordinary `load` still reads
+`state.safetensors` for exact continuation.
 Checkpoint paths must be on persistent storage when used in Colab. The caller
 chooses storage and never overwrites an existing checkpoint directory.
 

@@ -133,6 +133,83 @@ def test_block_policy_binds_checkpoint_source() -> None:
     assert train.source_identity(args, cfg, sequence_length=512) != checkpointed
 
 
+def test_qat_warm_start_admits_old_topology_without_loosening_resume(
+    tmp_path: Path,
+) -> None:
+    """A 1-device dense source can seed 8-device QAT with a new cursor."""
+    cfg = model.Config(4, 8, 1, 1, 8, ("conv",))
+    args = argparse.Namespace(
+        head_seed=6,
+        data_seed=17,
+        microbatches=4,
+        rows=2,
+        no_remat=False,
+        fuse_accumulation=False,
+        devices=1,
+        warm_start_source_id=None,
+    )
+    old_source = train.source_identity(args, cfg, sequence_length=512)
+    args.devices = 8
+    args.rows = 16
+    args.warm_start_source_id = old_source
+    new_source = train.source_identity(
+        args,
+        cfg,
+        sequence_length=512,
+        quantization_kind="ternary-g128-absmax-f16-v1",
+    )
+    assert old_source != new_source
+    assert (
+        train.warm_start_source_identity(args, cfg, sequence_length=512)
+        == old_source
+    )
+    inventory = parameters.build_inventory(
+        {"weight": (2,)},
+        format_id="fixture/1",
+        decayed_names=frozenset(),
+        source_dtype="float32",
+    )
+    masters = {"weight": jnp.asarray([1.0, 2.0], dtype=jnp.float32)}
+    prior = tmp_path / "dense"
+    training_state.save(
+        prior,
+        adamw.initialize_state(masters, inventory),
+        inventory,
+        optimizer_id="prior-adam",
+        cursor=training_state.Cursor("dense-run", "data", old_source, 0),
+    )
+    (prior / "state.safetensors").rename(prior / "model.safetensors")
+    warm = training_state.load_warm_start_masters(
+        prior,
+        inventory,
+        run_id="dense-run",
+        data_sha256="data",
+        source_id=train.warm_start_source_identity(
+            args, cfg, sequence_length=512
+        ),
+        tensor_filename="model.safetensors",
+    )
+    assert jnp.array_equal(warm["weight"], masters["weight"])
+    with pytest.raises(ValueError, match="run/data/source identity"):
+        training_state.load(
+            prior,
+            inventory,
+            optimizer_id="prior-adam",
+            run_id="dense-run",
+            data_sha256="data",
+            source_id=new_source,
+        )
+    with pytest.raises(FileNotFoundError):
+        training_state.load(
+            prior,
+            inventory,
+            optimizer_id="prior-adam",
+            run_id="dense-run",
+            data_sha256="data",
+            source_id=old_source,
+        )
+
+
 def test_smoke_rejects_changed_checkpoint_tensor(tmp_path: Path) -> None:
     """The smoke checks restored values against the live update."""
     inventory = parameters.build_inventory(
