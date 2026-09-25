@@ -20,16 +20,19 @@ from examples.polyomino.evaluate import make_evaluator
 from minifield_training.batching import classification as class_batching
 from minifield_training.batching import contracts as batch_contracts
 from minifield_training.batching import dense
+from minifield_training.checkpoints import inference_output
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
 from minifield_training.core import parameters as core_parameters
 from minifield_training.engine import training_run
+from minifield_training.kernels import quantization as quant_kernels
 from minifield_training.models.lfm2_5 import model
 from minifield_training.models.lfm2_5 import pretrained as model_source
 from minifield_training.optimizers import adamw
 from minifield_training.optimizers import state as optimizer_state
 from minifield_training.strategies import classification
 from minifield_training.strategies import pretrained
+from minifield_training.strategies import quantization
 
 
 def load_model_metadata(model_dir: Path) -> tuple[model.Config, Tokenizer]:
@@ -50,7 +53,11 @@ def load_model_metadata(model_dir: Path) -> tuple[model.Config, Tokenizer]:
 
 
 def source_identity(
-    args: argparse.Namespace, cfg: model.Config, *, sequence_length: int
+    args: argparse.Namespace,
+    cfg: model.Config,
+    *,
+    sequence_length: int,
+    quantization_kind: str | None = None,
 ) -> str:
     """Bind the pretrained release, head seed, and replayable batch order."""
     settings = {
@@ -69,7 +76,25 @@ def source_identity(
         settings["fuse_accumulation"] = True
     if args.devices > 1:
         settings["data_parallel_devices"] = args.devices
+    if quantization_kind is not None:
+        settings["quantization"] = quantization_kind
     return hashlib.sha256(json_io.canonical(settings).encode()).hexdigest()
+
+
+def quantization_strategy(
+    cfg: model.Config, kind: str
+) -> quantization.NamedQuantization | None:
+    """Select the model's exact projection names for one QAT algorithm."""
+    if kind == "dense":
+        return None
+    identities = {
+        "ternary": "ternary-g128-absmax-f16-v1",
+        "nf4": "nf4-g128-absmax-f16-v1",
+    }
+    return quantization.NamedQuantization(
+        quant_kernels.Group128Quantizer(identities[kind]),
+        classification.projection_names(cfg),
+    )
 
 
 def optimizer_config(learning_rate: float) -> adamw.AdamWConfig:
@@ -159,7 +184,9 @@ def latest_checkpoint(
     return max(candidates)[1] if candidates else None
 
 
-def main() -> None:
+def main(
+    output_strategy: inference_output.OutputStrategy | None = None,
+) -> None:
     """Run a short startup smoke or a bounded resumed training session."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, required=True)
@@ -169,6 +196,8 @@ def main() -> None:
     resume = parser.add_mutually_exclusive_group()
     resume.add_argument("--resume", type=Path)
     resume.add_argument("--resume-latest", action="store_true")
+    resume.add_argument("--warm-start-checkpoint", type=Path)
+    parser.add_argument("--warm-start-run-id")
     parser.add_argument("--skip-if-resumed", action="store_true")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-hours", type=float)
@@ -187,6 +216,10 @@ def main() -> None:
     parser.add_argument("--no-remat", action="store_true")
     parser.add_argument("--fuse-accumulation", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=0.0001)
+    parser.add_argument(
+        "--quantization", choices=("dense", "ternary", "nf4"), default="dense"
+    )
+    parser.add_argument("--output-weights", type=Path)
     parser.add_argument("--checkpoint-every", type=int, default=5000)
     parser.add_argument("--verify-checkpoint", action="store_true")
     parser.add_argument("--report-every", type=int, default=10)
@@ -215,9 +248,15 @@ def main() -> None:
     cfg, tokenizer = load_model_metadata(args.model_dir)
     data_sha256 = source.data_identity()
     data = source.load_decisions(args.dataset_cache)
-    inventory = classification.parameter_inventory(cfg, ALLOWED)
+    qat = quantization_strategy(cfg, args.quantization)
+    inventory = classification.parameter_inventory(cfg, ALLOWED, qat)
     optimizer = optimizer_config(args.learning_rate)
-    source_id = source_identity(args, cfg, sequence_length=args.sequence_length)
+    source_id = source_identity(
+        args,
+        cfg,
+        sequence_length=args.sequence_length,
+        quantization_kind=qat.identity if qat is not None else None,
+    )
     resume_path = (
         latest_checkpoint(
             args.checkpoint_root,
@@ -228,7 +267,24 @@ def main() -> None:
         if args.resume_latest
         else args.resume
     )
-    if resume_path is None:
+    if args.warm_start_checkpoint is not None:
+        if qat is None or not args.warm_start_run_id:
+            raise ValueError(
+                "QAT warm start needs dense run ID and quantization"
+            )
+        dense_inventory = classification.parameter_inventory(cfg, ALLOWED)
+        dense_masters = training_state.load_warm_start_masters(
+            args.warm_start_checkpoint,
+            dense_inventory,
+            run_id=args.warm_start_run_id,
+            data_sha256=data_sha256,
+            source_id=source_identity(
+                args, cfg, sequence_length=args.sequence_length
+            ),
+        )
+        full_state = adamw.initialize_state(dense_masters, inventory)
+        cursor = training_state.Cursor(args.run_id, data_sha256, source_id, 0)
+    elif resume_path is None:
         loaded_cfg, backbone = pretrained.load_verified(
             args.model_dir, model_source.BASE, model_source.Adapter()
         )
@@ -268,6 +324,7 @@ def main() -> None:
         rematerialize_blocks=not args.no_remat,
         fuse_accumulation=args.fuse_accumulation,
         mesh=mesh,
+        quantization_strategy=qat,
     )
     batch_strategy = dense.DenseBatchStrategy(
         batch_contracts.BatchShape(
@@ -297,6 +354,8 @@ def main() -> None:
             max_ticks=args.eval_max_ticks,
             seed=args.eval_seed,
             replay_dir=args.checkpoint_root / "replays",
+            inventory=inventory,
+            quantization_strategy=qat,
         )
         if args.eval_games > 0
         else None
@@ -352,7 +411,7 @@ def main() -> None:
     )
     run_started = time.monotonic()
     try:
-        _, final_cursor = training_run.run(
+        final_state, final_cursor = training_run.run(
             None,
             full_state,
             update,
@@ -373,6 +432,16 @@ def main() -> None:
         if tracing:
             jax.profiler.stop_trace()  # type: ignore[no-untyped-call]
     elapsed = time.monotonic() - run_started
+    if args.output_weights is not None:
+        effective = quantization.apply(final_state["params"], inventory, qat)
+        writer = output_strategy or inference_output.DenseEffectiveOutput()
+        writer.write(
+            args.output_weights,
+            effective,
+            inventory,
+            source_model=model_source.BASE.model_id,
+            source_revision=model_source.BASE.revision,
+        )
     updates = final_cursor.next_batch - cursor.next_batch
     report(
         {

@@ -72,3 +72,35 @@ git bundle create /tmp/minifield-training-tpu-v5e-8.bundle HEAD
 The notebook automatically clones the uploaded bundle when present, verifies
 its exact source revision, and still downloads pinned model and dataset files
 from Hugging Face. Bundles and training outputs stay outside Git.
+
+## CPU development QAT recipe
+
+The CLI accepts `--quantization ternary` or `--quantization nf4`. These
+select the Base model's attention, feed-forward, and convolution projection
+matrices by exact name. Frozen embeddings, the classifier head, norms, and
+depthwise taps remain dense. FP32 masters and Adam state stay in full-state
+checkpoints. Gameplay evaluation uses the same effective quantized weights.
+No TPU QAT run or speed measurement has been made.
+
+To start from an existing dense checkpoint, use a new run ID and checkpoint
+root, keeping the dense run's data, batch, and device-count settings:
+
+```sh
+python -m examples.polyomino.train \
+  --model-dir /path/to/base --dataset-cache /path/to/data \
+  --checkpoint-root /path/to/qat-checkpoints --run-id qat-1 \
+  --warm-start-checkpoint /path/to/dense/step-00000100 \
+  --warm-start-run-id dense-1 --quantization ternary \
+  --platform cpu --devices 1 --max-steps 2 \
+  --output-weights /path/to/qat-effective.safetensors
+```
+
+Warm start takes only the dense FP32 masters and initializes fresh Adam
+moments and a fresh data cursor. Exact QAT resume uses `--resume` or
+`--resume-latest` with the same quantization and run settings. The output
+asset holds effective FP32 tensors with `format=pt` and provenance metadata;
+it isn't a small packed file or a complete runtime bundle. A consumer must
+pair it with a compatible config declaring `dtype=float32` and the tokenizer.
+Packed mixed-precision delivery, including dense embeddings, needs a future
+runtime per-tensor format. Existing notebooks retain their pinned training
+recipe until hardware qualification is available.

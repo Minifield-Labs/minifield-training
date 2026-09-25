@@ -25,3 +25,13 @@ imports stay dependency-free.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 Document each added public contract, consumer, example, and test here.
+
+`inference_output.OutputStrategy` is separate from resumable full-state
+checkpoints. `DenseEffectiveOutput` writes already-effective FP32 tensors to
+one immutable safetensors weight asset with `format=pt`, source lineage,
+inventory identity, and optional quantization lineage. It validates exact
+keys, shapes, dtype, and finiteness, then makes strided values contiguous.
+The runtime dense weight path can read this format. This asset isn't a complete
+runtime bundle; config/tokenizer packaging and admission remain separate.
+It doesn't reduce storage size. Mixed dense embeddings plus packed projections
+need a future runtime per-tensor precision contract.

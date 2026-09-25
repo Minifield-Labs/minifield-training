@@ -11,6 +11,17 @@ qualification and performance evidence are still pending.
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 Document each added public contract, consumer, example, and test here.
 
+`quantization.Group128Quantizer` implements ternary and NF4 fake quantization
+for FP32 rank-2 matrices whose reduction width divides 128. Each group uses
+its FP32 absmax converted to FP16 and back before decoding. Ternary uses
+half-away threshold decisions; NF4 picks the nearest of 16 normal-float
+levels, breaking ties toward the lower code. FP32 transition thresholds are
+precomputed from exact codebook midpoints so rounding a midpoint doesn't
+change nearest-level decisions. Zero and FP16-underflow groups
+decode to zero. Forward values are decoded FP32; the master gradient uses
+identity STE. CPU eager/JIT fixtures cover these semantics. TPU memory and
+numerics remain unmeasured.
+
 ## Implemented contracts
 
 ### `normalization.rms_norm`

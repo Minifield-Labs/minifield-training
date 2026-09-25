@@ -181,3 +181,35 @@ def load(
     }
     adamw.validate_full_weight_state(restored, inventory)
     return restored, cursor
+
+
+def load_warm_start_masters(
+    directory: Path,
+    inventory: core_parameters.FullParameterInventory,
+    *,
+    run_id: str,
+    data_sha256: str,
+    source_id: str,
+) -> dict[str, jax.Array]:
+    """Admit a prior full checkpoint and return only verified FP32 masters.
+
+    The prior optimizer identity is read from its manifest solely to verify
+    that checkpoint through ``load``. The caller starts a new optimizer and
+    cursor; this path never claims exact optimizer continuation.
+    """
+    raw: object = json.loads(
+        (directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(raw, dict) or not isinstance(
+        raw.get("optimizer_id"), str
+    ):
+        raise ValueError("Invalid warm-start checkpoint manifest")
+    restored, _ = load(
+        directory,
+        inventory,
+        optimizer_id=raw["optimizer_id"],
+        run_id=run_id,
+        data_sha256=data_sha256,
+        source_id=source_id,
+    )
+    return restored["params"]

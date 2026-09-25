@@ -166,6 +166,24 @@ def expected_shapes(cfg: Config) -> dict[str, tuple[int, ...]]:
     return shapes
 
 
+def projection_names(cfg: Config) -> frozenset[str]:
+    """Return only model-owned attention, FFN, and conv projection names."""
+    suffixes = (
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.out_proj.weight",
+        "conv.in_proj.weight",
+        "conv.out_proj.weight",
+        "feed_forward.w1.weight",
+        "feed_forward.w2.weight",
+        "feed_forward.w3.weight",
+    )
+    return frozenset(
+        name for name in expected_shapes(cfg) if name.endswith(suffixes)
+    )
+
+
 def parameter_inventory(
     cfg: Config,
     *,
