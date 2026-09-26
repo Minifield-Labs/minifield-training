@@ -157,8 +157,9 @@ def make_lfm2_5_streaming_step(
     attention_backend: str = "dense",
     rematerialize_blocks: bool = True,
     fuse_accumulation: bool = False,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> step.StreamingStep:
-    """Compile one physical gradient at a time for a single device."""
+    """Compile physical gradients, optionally splitting rows over a mesh."""
     return step.make_streaming_step(
         _loss_terms(
             cfg,
@@ -171,6 +172,7 @@ def make_lfm2_5_streaming_step(
         inventory,
         optimizer,
         fuse_accumulation=fuse_accumulation,
+        mesh=mesh,
     )
 
 

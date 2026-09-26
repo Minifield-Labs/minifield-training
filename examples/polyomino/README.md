@@ -38,3 +38,37 @@ peaked at 7.75 of 15.75 GiB device memory. `--microbatches 2 --rows 4`,
 v5e speed and memory have not been measured. Each trial needs its own run ID
 and checkpoint root. The final `end_to_end_updates_per_second` includes
 prompt preparation, checkpoints, gameplay, and profiling export.
+
+For a single-host v5e-8, train with `--platform tpu --devices 8 --rows 16
+--microbatches 4`. Rows are global: this gives 2 rows per device per physical
+microbatch and 64 decisions per logical optimizer update. The shared engine
+replicates the FP32 model/Adam state and combines gradients over all 8 devices.
+The learning rate stays at 0.0001; the larger logical batch is a new recipe
+whose convergence and TPU throughput need measurement.
+
+Use a separate run ID and checkpoint root. Device count and global batch shape
+are part of the resume identity, so single-device checkpoints won't silently
+resume with a different recipe. Pass the same `--devices`, `--rows`, and
+`--microbatches` to the evaluation CLI for checkpoint admission. Gameplay
+scores on one device, including when invoked after a distributed checkpoint.
+The 8-device CPU tests cover gradient reduction and checkpoint restore;
+the full pretrained v5e-8 run remains unqualified until its hardware smoke.
+
+The separate [v5e-8 notebook](../colab_polyomino_classifier_tpu_v5e_8.ipynb)
+uses those settings, verifies 8 local TPUs, and keeps the original notebook
+unchanged. It pins the trainer source, verifies a 2-update checkpoint, then
+offers resumed training bounded by 3 hours and the remaining dataset updates.
+Changing its recipe requires a fresh checkpoint directory. Evaluation receives
+the same training settings when admitting a saved checkpoint.
+
+The pinned commit must be available on GitHub or in a source bundle. To run
+from a local branch, create a bundle from this checkout and upload it to
+`/content/minifield-training-tpu-v5e-8.bundle` in the notebook runtime:
+
+```sh
+git bundle create /tmp/minifield-training-tpu-v5e-8.bundle HEAD
+```
+
+The notebook automatically clones the uploaded bundle when present, verifies
+its exact source revision, and still downloads pinned model and dataset files
+from Hugging Face. Bundles and training outputs stay outside Git.

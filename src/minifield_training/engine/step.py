@@ -21,6 +21,55 @@ type LogicalStep = Callable[
     [state.State, types.DeviceBatch, jax.Array], adamw.CommitResult
 ]
 type Accumulation = tuple[jax.Array, jax.Array, types.Parameters, jax.Array]
+type PhysicalGradient = Callable[
+    [types.Parameters, types.DeviceBatch],
+    tuple[jax.Array, jax.Array, types.Parameters],
+]
+
+
+def _parallel_gradient(
+    gradient: PhysicalGradient, mesh: jax.sharding.Mesh
+) -> PhysicalGradient:
+    """Split rows and replicate global loss, count, and gradient sums."""
+    if mesh.axis_names != ("data",):
+        raise ValueError(
+            "Data parallelism requires a one-dimensional data mesh"
+        )
+
+    def reduce_gradient(
+        parameters: types.Parameters, batch: types.DeviceBatch
+    ) -> tuple[jax.Array, jax.Array, types.Parameters]:
+        """Prevent positive counts from hiding an invalid replica count."""
+        # Mark replica-local differentiation inputs before value_and_grad.
+        # Otherwise VMA autodiff inserts its own psum for invariant masters,
+        # and the explicit reduction below multiplies gradients by mesh.size.
+        # JAX 0.7.2's collective APIs don't carry type annotations.
+        local = jax.lax.pvary(  # type: ignore[no-untyped-call]
+            parameters, "data"
+        )
+        loss, count, gradients = gradient(local, batch)
+        count = jnp.where(
+            jnp.isfinite(count) & (count >= 0), count, jnp.float32(jnp.nan)
+        )
+        return cast(
+            tuple[jax.Array, jax.Array, types.Parameters],
+            jax.lax.psum(  # type: ignore[no-untyped-call]
+                (loss, count, gradients), "data"
+            ),
+        )
+
+    # JAX 0.7.2's PartitionSpec constructor has no type annotations.
+    replicated = jax.sharding.PartitionSpec()  # type: ignore[no-untyped-call]
+    rows = jax.sharding.PartitionSpec("data")  # type: ignore[no-untyped-call]
+    return cast(
+        PhysicalGradient,
+        jax.shard_map(
+            reduce_gradient,
+            mesh=mesh,
+            in_specs=(replicated, rows),
+            out_specs=(replicated, replicated, replicated),
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -29,14 +78,11 @@ class StreamingStep:
 
     The host only selects active slots. Gradients, sums, normalization, and
     the transactional update stay on device, with one commit per logical step.
-    This avoids placing a full-model reverse pass inside a scanned optimizer
-    program on a memory-constrained single device.
+    This bounds the reverse pass to one physical batch per device. An optional
+    data mesh splits global rows while keeping masters and moments replicated.
     """
 
-    gradient: Callable[
-        [types.Parameters, types.DeviceBatch],
-        tuple[jax.Array, jax.Array, types.Parameters],
-    ]
+    gradient: PhysicalGradient
     add: Callable[[types.Parameters, types.Parameters], types.Parameters]
     normalize: Callable[[types.Parameters, jax.Array], types.Parameters]
     transition: Callable[
@@ -50,6 +96,7 @@ class StreamingStep:
         ]
         | None
     ) = None
+    mesh: jax.sharding.Mesh | None = None
 
     def __call__(
         self,
@@ -66,6 +113,11 @@ class StreamingStep:
             for value in microbatches.values()
         ):
             raise ValueError("microbatches need a common leading axis")
+        if self.mesh is not None and any(
+            value.ndim < 2 or value.shape[1] % self.mesh.size
+            for value in microbatches.values()
+        ):
+            raise ValueError("Physical rows must be divisible by device count")
         enabled = np.asarray(active)
         total: Accumulation | None = None
         for index in np.flatnonzero(enabled):
@@ -121,8 +173,9 @@ def make_streaming_step(
     config: adamw.AdamWConfig,
     *,
     fuse_accumulation: bool = False,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> StreamingStep:
-    """Build single-device accumulation with an optional fused gradient sum.
+    """Build accumulation with optional row parallelism and fused sums.
 
     Fusing later physical gradients with their previous sums needs device
     memory for both the reverse pass and the carried gradients. Keep it opt-in
@@ -158,6 +211,10 @@ def make_streaming_step(
         )
         return loss, count, gradients
 
+    physical_gradient = (
+        gradient if mesh is None else _parallel_gradient(gradient, mesh)
+    )
+
     def add(
         accumulated: types.Parameters,
         gradients: types.Parameters,
@@ -182,7 +239,7 @@ def make_streaming_step(
         previous: Accumulation,
     ) -> Accumulation:
         """Differentiate and add one later slot in the same JIT program."""
-        loss, count, gradients = gradient(parameters, batch)
+        loss, count, gradients = physical_gradient(parameters, batch)
         old_loss, old_count, old_gradients, counts_valid = previous
         return (
             old_loss + loss,
@@ -195,12 +252,13 @@ def make_streaming_step(
         )
 
     return StreamingStep(
-        jax.jit(gradient),
+        jax.jit(physical_gradient),
         jax.jit(add, donate_argnums=(0,)),
         jax.jit(normalize, donate_argnums=(0,)),
         adamw.make_donated_transaction(inventory, config),
         inventory,
         jax.jit(accumulate, donate_argnums=(2,)) if fuse_accumulation else None,
+        mesh,
     )
 
 

@@ -63,4 +63,10 @@ shared engine's fused gradient sum. It removes separate add programs after
 the first active microbatch. This path is opt-in until v5e memory and speed
 are measured.
 
+`make_lfm2_5_streaming_step(..., mesh=mesh)` delegates data parallelism to the
+shared engine. The `data` mesh splits global physical rows while parameters
+and optimizer state stay replicated. CPU tests cover 8-device gradient
+agreement on a tiny conv/attention classifier, including fully padded replicas.
+Full Base-model TPU memory and throughput still require hardware evidence.
+
 The executable dependency policy is [architecture.toml](../../../architecture.toml).

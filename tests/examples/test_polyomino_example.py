@@ -122,11 +122,15 @@ def test_block_policy_binds_checkpoint_source() -> None:
         rows=2,
         no_remat=False,
         fuse_accumulation=False,
+        devices=1,
     )
     checkpointed = train.source_identity(args, cfg, sequence_length=512)
     args.no_remat = True
     plain = train.source_identity(args, cfg, sequence_length=512)
     assert checkpointed != plain
+    args.no_remat = False
+    args.devices = 8
+    assert train.source_identity(args, cfg, sequence_length=512) != checkpointed
 
 
 def test_smoke_rejects_changed_checkpoint_tensor(tmp_path: Path) -> None:
