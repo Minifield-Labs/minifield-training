@@ -1,4 +1,4 @@
-"""Play complete Tetris games using only learned classifier actions."""
+"""Play complete polyomino games using only learned classifier actions."""
 
 import argparse
 from collections.abc import Callable
@@ -10,8 +10,9 @@ import jax.numpy as jnp
 import numpy as np
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
-from examples.tetris import engine
-from examples.tetris import serialize
+from examples.polyomino import engine
+from examples.polyomino import serialize
+from examples.polyomino import source
 from minifield_training.checkpoints import training_state
 from minifield_training.models.lfm2_5 import model
 from minifield_training.optimizers import state as optimizer_state
@@ -47,10 +48,7 @@ def make_evaluator(
         full_state: optimizer_state.State, step: int
     ) -> dict[str, float]:
         """Run until each seeded game dies or hits its explicit tick cap."""
-        states = [
-            engine.TetrisEngine(engine.mulberry32(seed + index))
-            for index in range(games)
-        ]
+        states = [engine.Game(seed + index) for index in range(games)]
         active = np.ones(games, dtype=np.bool_)
         frames: list[str] = []
         for tick in range(max_ticks):
@@ -85,10 +83,8 @@ def make_evaluator(
                         f"lines={game.lines} pieces={game.pieces}\n"
                         + "\n".join(serialize.board_rows(game))
                     )
-                before = game.games
-                game.queue_input(action)
-                game.tick()
-                if game.games != before:
+                game.step(action)
+                if game.game_over:
                     active[index] = False
         if replay_dir is not None:
             replay_dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +93,7 @@ def make_evaluator(
         return {
             "lines_per_game": float(np.mean([game.lines for game in states])),
             "pieces_per_game": float(np.mean([game.pieces for game in states])),
-            "survival_ticks": float(np.mean([game.ticks for game in states])),
+            "survival_ticks": float(np.mean([game.tick for game in states])),
             "completed_games": float(games - int(active.sum())),
         }
 
@@ -107,17 +103,17 @@ def make_evaluator(
 def main() -> None:
     """Replay a saved policy through real games and write readable frames."""
     # The CLI uses train's validation, while train imports this evaluator.
-    from examples.tetris import train  # pylint: disable=import-outside-toplevel
+    # pylint: disable-next=import-outside-toplevel
+    from examples.polyomino import train
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--replay-dir", type=Path, required=True)
     parser.add_argument("--games", type=int, default=3)
     parser.add_argument("--max-ticks", type=int, default=2000)
-    parser.add_argument("--seed", type=int, default=900)
+    parser.add_argument("--seed", type=int, default=1 << 31)
     parser.add_argument("--sequence-length", type=int, default=512)
     parser.add_argument("--data-seed", type=int, default=17)
     parser.add_argument("--head-seed", type=int, default=6)
@@ -138,7 +134,7 @@ def main() -> None:
         inventory,
         optimizer_id=optimizer.implementation_identity,
         run_id=args.run_id,
-        data_sha256=train.dataset_identity(args.dataset),
+        data_sha256=source.data_identity(),
         source_id=source_id,
     )
     callback = make_evaluator(

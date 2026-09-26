@@ -1,6 +1,7 @@
-"""Warm-start or resume the Base Tetris decision classifier on one device."""
+"""Warm-start or resume the Base polyomino decision classifier on one device."""
 
 import argparse
+from collections.abc import Mapping
 import dataclasses
 import hashlib
 import json
@@ -10,17 +11,19 @@ import time
 from typing import cast
 
 import jax
+import numpy as np
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
-from examples.tetris.evaluate import ALLOWED
-from examples.tetris.evaluate import make_evaluator
-from examples.tetris.prepare import generator_identity
+from examples.polyomino import source
+from examples.polyomino.evaluate import ALLOWED
+from examples.polyomino.evaluate import make_evaluator
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
-from minifield_training.datasets.labeled import LabeledSequence
+from minifield_training.core import parameters as core_parameters
 from minifield_training.engine import classification_run
 from minifield_training.models.lfm2_5 import model
 from minifield_training.optimizers import adamw
+from minifield_training.optimizers import state as optimizer_state
 from minifield_training.strategies import classification
 from minifield_training.strategies import pretrained
 
@@ -40,54 +43,6 @@ def load_model_metadata(model_dir: Path) -> tuple[model.Config, Tokenizer]:
         raise ValueError("Model config must be an object")
     cfg = model.Config.from_dict(cast(dict[str, object], raw))
     return cfg, Tokenizer.from_file(str(tokenizer_path))
-
-
-def dataset_identity(path: Path) -> str:
-    """Verify the prepared expert source and bytes before consuming records."""
-    manifest_path = path.with_suffix(path.suffix + ".manifest.json")
-    raw: object = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or set(raw) != {
-        "format",
-        "model_id",
-        "revision",
-        "tokenizer_sha256",
-        "data_sha256",
-        "games",
-        "max_ticks",
-        "sequence_length",
-        "seed",
-        "samples",
-        "lines",
-        "pieces",
-        "generator_sha256",
-    }:
-        raise ValueError("Invalid prepared Tetris dataset manifest")
-    manifest = cast(dict[str, object], raw)
-    data_sha256 = json_io.digest_file(path)
-    if (
-        manifest["format"] != "tetris.expert-decisions/1"
-        or manifest["model_id"] != pretrained.BASE.model_id
-        or manifest["revision"] != pretrained.BASE.revision
-        or manifest["tokenizer_sha256"] != pretrained.BASE.tokenizer_sha256
-        or manifest["data_sha256"] != data_sha256
-        or manifest["generator_sha256"] != generator_identity()
-        or any(
-            # bool is an int subclass; manifest counts require plain ints.
-            # pylint: disable-next=unidiomatic-typecheck
-            type(manifest[key]) is not int or cast(int, manifest[key]) < 0
-            for key in (
-                "games",
-                "max_ticks",
-                "sequence_length",
-                "seed",
-                "samples",
-                "lines",
-                "pieces",
-            )
-        )
-    ):
-        raise ValueError("Prepared Tetris dataset identity mismatch")
-    return data_sha256
 
 
 def source_identity(
@@ -114,6 +69,46 @@ def source_identity(
 def optimizer_config(learning_rate: float) -> adamw.AdamWConfig:
     """Use the shared AdamW implementation with one explicit learning rate."""
     return adamw.AdamWConfig(learning_rate=learning_rate)
+
+
+def verify_checkpoint_roundtrip(
+    directory: Path,
+    current: optimizer_state.State,
+    cursor: training_state.Cursor,
+    inventory: core_parameters.FullParameterInventory,
+    optimizer_id: str,
+) -> None:
+    """Check every saved parameter and moment against live device state."""
+    with jax.default_device(jax.devices("cpu")[0]):
+        restored, restored_cursor = training_state.load(
+            directory,
+            inventory,
+            optimizer_id=optimizer_id,
+            run_id=cursor.run_id,
+            data_sha256=cursor.data_sha256,
+            source_id=cursor.source_id,
+        )
+    if restored_cursor != cursor or not np.array_equal(
+        np.asarray(current["step"]), np.asarray(restored["step"])
+    ):
+        raise RuntimeError("Checkpoint cursor or optimizer step changed")
+
+    def compare_group(
+        group: str,
+        live: Mapping[str, jax.Array],
+        saved: Mapping[str, jax.Array],
+    ) -> None:
+        """Identify the first tensor changed by serialization."""
+        for name in inventory.names:
+            if not np.array_equal(
+                np.asarray(live[name]),
+                np.asarray(saved[name]),
+            ):
+                raise RuntimeError(f"Checkpoint changed {group}/{name}")
+
+    compare_group("params", current["params"], restored["params"])
+    compare_group("m", current["m"], restored["m"])
+    compare_group("v", current["v"], restored["v"])
 
 
 def latest_checkpoint(
@@ -158,49 +153,11 @@ def latest_checkpoint(
     return max(candidates)[1] if candidates else None
 
 
-def load_dataset(path: Path) -> tuple[str, list[LabeledSequence]]:
-    """Keep complete tokenized records on the host for batch transfer."""
-    data_sha256 = dataset_identity(path)
-    examples: list[LabeledSequence] = []
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
-            raw: object = json.loads(line)
-            if not isinstance(raw, dict) or set(raw) != {
-                "id",
-                "group_id",
-                "input_ids",
-                "label",
-            }:
-                raise ValueError(
-                    f"Invalid decision record at line {line_number}"
-                )
-            item = cast(dict[str, object], raw)
-            ids = item["input_ids"]
-            if (
-                not isinstance(item["id"], str)
-                or not isinstance(item["group_id"], str)
-                or not isinstance(ids, list)
-                or not isinstance(item["label"], int)
-            ):
-                raise ValueError(
-                    f"Invalid decision types at line {line_number}"
-                )
-            examples.append(
-                LabeledSequence(
-                    item["id"],
-                    item["group_id"],
-                    tuple(ids),
-                    item["label"],
-                )
-            )
-    return data_sha256, examples
-
-
 def main() -> None:
     """Run a short startup smoke or a bounded resumed training session."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, required=True)
-    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--dataset-cache", type=Path, required=True)
     parser.add_argument("--checkpoint-root", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     resume = parser.add_mutually_exclusive_group()
@@ -219,10 +176,11 @@ def main() -> None:
     parser.add_argument("--fuse-accumulation", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=0.0001)
     parser.add_argument("--checkpoint-every", type=int, default=5000)
+    parser.add_argument("--verify-checkpoint", action="store_true")
     parser.add_argument("--report-every", type=int, default=10)
     parser.add_argument("--eval-games", type=int, default=0)
     parser.add_argument("--eval-max-ticks", type=int, default=2000)
-    parser.add_argument("--eval-seed", type=int, default=900)
+    parser.add_argument("--eval-seed", type=int, default=1 << 31)
     parser.add_argument("--profile-dir", type=Path)
     args = parser.parse_args()
     if not args.checkpoint_root.is_absolute():
@@ -236,7 +194,8 @@ def main() -> None:
         raise ValueError("Profiling needs a separate 4-50 update run")
     classification_run.require_single_device(args.platform)
     cfg, tokenizer = load_model_metadata(args.model_dir)
-    data_sha256, examples = load_dataset(args.dataset)
+    data_sha256 = source.data_identity()
+    data = source.load_decisions(args.dataset_cache)
     inventory = classification.parameter_inventory(cfg, ALLOWED)
     optimizer = optimizer_config(args.learning_rate)
     source_id = source_identity(args, cfg, sequence_length=args.sequence_length)
@@ -317,6 +276,28 @@ def main() -> None:
         if args.eval_games > 0
         else None
     )
+    if args.verify_checkpoint:
+        game_evaluator = evaluator
+
+        def verify_evaluator(
+            current: optimizer_state.State, step: int
+        ) -> dict[str, float]:
+            """Reload the saved smoke checkpoint before optional gameplay."""
+            verify_checkpoint_roundtrip(
+                args.checkpoint_root / f"step-{step:08d}",
+                current,
+                training_state.Cursor(
+                    args.run_id, data_sha256, source_id, step
+                ),
+                inventory,
+                optimizer.implementation_identity,
+            )
+            metrics = {"checkpoint_roundtrip_verified": 1.0}
+            if game_evaluator is not None:
+                metrics.update(game_evaluator(current, step))
+            return metrics
+
+        evaluator = verify_evaluator
 
     tracing = False
 
@@ -344,7 +325,7 @@ def main() -> None:
     run_started = time.monotonic()
     try:
         _, final_cursor = classification_run.run(
-            examples,
+            None,
             full_state,
             update,
             inventory,
@@ -356,6 +337,7 @@ def main() -> None:
             report=report,
             required_platform=args.platform,
             annotate_steps=args.profile_dir is not None,
+            batch_source=source.HFDatasetBatchSource(data, tokenizer, config),
         )
     finally:
         if tracing:

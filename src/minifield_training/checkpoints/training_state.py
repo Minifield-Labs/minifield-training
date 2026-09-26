@@ -47,7 +47,9 @@ def _arrays(full_state: state.State) -> dict[str, npt.NDArray[np.generic]]:
     result: dict[str, npt.NDArray[np.generic]] = {}
     for group in ("params", "m", "v"):
         for name, value in full_state[group].items():
-            result[f"{group}/{name}"] = np.asarray(value, dtype=np.float32)
+            result[f"{group}/{name}"] = np.ascontiguousarray(
+                np.asarray(value, dtype=np.float32)
+            )
     result["step"] = np.asarray(full_state["step"], dtype=np.int32)
     return result
 

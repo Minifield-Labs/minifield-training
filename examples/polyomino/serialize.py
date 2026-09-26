@@ -1,39 +1,39 @@
-"""Serialize a 22-row Tetris board into the action-only ChatML prompt."""
+"""Serialize a 22-row polyomino board into the action-only ChatML prompt."""
 
 from typing import cast
 
 import tokenizers  # type: ignore[import-untyped]  # Native package lacks stubs.
 
-from examples.tetris import engine as tetris
+from examples.polyomino import engine
 
 LEGEND = (
-    "You are playing tetris. The board state is below.\n"
+    "You are playing a polyomino game. The board state is below.\n"
     ". is an empty cell\n"
     "# is a settled cell\n"
     "% is your falling piece"
 )
 
 
-def column_heights(cells: bytes | bytearray) -> list[int]:
+def column_heights(cells: list[int]) -> list[int]:
     """Return per-column stack heights, 0-22."""
     heights = []
-    for x in range(tetris.COLS):
+    for x in range(engine.WIDTH):
         height = 0
-        for y in range(tetris.ROWS):
-            if cells[y * tetris.COLS + x] != 0:
-                height = tetris.ROWS - y
+        for y in range(engine.HEIGHT):
+            if bool(cells[y] & (1 << x)):
+                height = engine.HEIGHT - y
                 break
         heights.append(height)
     return heights
 
 
-def hole_count(cells: bytes | bytearray) -> int:
+def hole_count(cells: list[int]) -> int:
     """Count empty cells with at least one occupied cell above in-column."""
     holes = 0
-    for x in range(tetris.COLS):
+    for x in range(engine.WIDTH):
         capped = False
-        for y in range(tetris.ROWS):
-            occupied = cells[y * tetris.COLS + x] != 0
+        for y in range(engine.HEIGHT):
+            occupied = bool(cells[y] & (1 << x))
             if occupied:
                 capped = True
             elif capped:
@@ -41,33 +41,36 @@ def hole_count(cells: bytes | bytearray) -> int:
     return holes
 
 
-def board_rows(state: tetris.TetrisEngine) -> list[str]:
+def board_rows(state: engine.Game) -> list[str]:
     """Render the 22-row grid with the falling piece overlaid as ``%``."""
-    grid = [["."] * tetris.COLS for _ in range(tetris.ROWS)]
-    for y in range(tetris.ROWS):
-        for x in range(tetris.COLS):
-            if state.cells[y * tetris.COLS + x] != 0:
+    grid = [["."] * engine.WIDTH for _ in range(engine.HEIGHT)]
+    for y in range(engine.HEIGHT):
+        for x in range(engine.WIDTH):
+            if state.board[y] & (1 << x):
                 grid[y][x] = "#"
-    for cx, cy in tetris.SHAPES[state.piece_kind][state.piece_rot]:
-        x = state.piece_x + cx
-        y = state.piece_y + cy
-        if 0 <= x < tetris.COLS and 0 <= y < tetris.ROWS:
+    for cx, cy in engine.SHAPES[state.kind][state.rotation]:
+        x = state.x + cx
+        y = state.y + cy
+        if 0 <= x < engine.WIDTH and 0 <= y < engine.HEIGHT:
             grid[y][x] = "%"
     return [" " + " ".join(row) for row in grid]
 
 
-def state_text(state: tetris.TetrisEngine) -> str:
+def state_text(state: engine.Game) -> str:
     """Return the user-turn board serialization (no ChatML framing)."""
-    heights = column_heights(state.cells)
+    heights = column_heights(state.board)
     height_text = " ".join(f"{h:02d}" for h in heights)
+    drop = engine.drop_distance(
+        state.board, state.kind, state.rotation, state.x, state.y
+    )
     fields = (
-        f"piece:{tetris.PIECE_NAMES[state.piece_kind]} "
-        f"rot:{state.piece_rot} "
-        f"x:{state.piece_x:02d} y:{state.piece_y:02d}\n"
-        f"next:{tetris.PIECE_NAMES[state.next_kind]}\n"
+        f"piece:{state.kind} "
+        f"rot:{state.rotation} "
+        f"x:{state.x:02d} y:{state.y:02d}\n"
+        f"next:{state.bag[-1]}\n"
         f"heights:{height_text}\n"
-        f"holes:{hole_count(state.cells):02d} "
-        f"drop:{state.drop_distance():02d}"
+        f"holes:{hole_count(state.board):02d} "
+        f"drop:{drop:02d}"
     )
     rows = "\n".join(board_rows(state))
     return f"<board>\n{rows}\n</board>\n{fields}"
@@ -84,13 +87,13 @@ def _wrap(user_text: str) -> str:
     )
 
 
-def prompt_text(state: tetris.TetrisEngine) -> str:
+def prompt_text(state: engine.Game) -> str:
     """Return the full ChatML prompt ending at the decision position."""
     return _wrap(state_text(state))
 
 
 def encode(
-    state: tetris.TetrisEngine,
+    state: engine.Game,
     tokenizer: tokenizers.Tokenizer,
 ) -> list[int]:
     """Tokenize one decision prompt; the last token is the readout slot."""

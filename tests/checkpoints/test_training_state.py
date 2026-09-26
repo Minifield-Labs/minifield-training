@@ -2,7 +2,9 @@
 
 import json
 from pathlib import Path
+from typing import cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -70,3 +72,46 @@ def test_complete_state_and_cursor_round_trip(tmp_path: Path) -> None:
             data_sha256="data-hash",
             source_id="source",
         )
+
+
+def test_strided_parameter_and_moments_round_trip(tmp_path: Path) -> None:
+    """Persist logical values from noncontiguous host views exactly."""
+    inventory = parameters.build_inventory(
+        {"conv.weight": (8, 1, 3)},
+        format_id="synthetic/strided",
+        decayed_names=frozenset(),
+    )
+    expected = np.arange(24, dtype=np.float32).reshape(8, 1, 3)[:, :, ::-1]
+    assert not expected.flags.c_contiguous
+    original = adamw.initialize_state(
+        {"conv.weight": jnp.asarray(expected)}, inventory
+    )
+    original["params"]["conv.weight"] = cast(jax.Array, expected)
+    original["m"]["conv.weight"] = cast(
+        jax.Array,
+        (np.arange(24, dtype=np.float32) + 24).reshape(8, 1, 3)[:, :, ::-1],
+    )
+    original["v"]["conv.weight"] = cast(
+        jax.Array,
+        (np.arange(24, dtype=np.float32) + 48).reshape(8, 1, 3)[:, :, ::-1],
+    )
+    cursor = training_state.Cursor("run", "data", "source", 0)
+    destination = tmp_path / "checkpoint"
+    training_state.save(
+        destination,
+        original,
+        inventory,
+        optimizer_id="adamw",
+        cursor=cursor,
+    )
+    restored, _ = training_state.load(
+        destination,
+        inventory,
+        optimizer_id="adamw",
+        run_id="run",
+        data_sha256="data",
+        source_id="source",
+    )
+    np.testing.assert_array_equal(restored["params"]["conv.weight"], expected)
+    np.testing.assert_array_equal(restored["m"]["conv.weight"], expected + 24)
+    np.testing.assert_array_equal(restored["v"]["conv.weight"], expected + 48)
