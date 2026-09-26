@@ -26,6 +26,18 @@ The update is compatible with `jax.jit`. FP32 masters, moments, accumulated
 loss, gradients and count are retained. CPU synthetic tests cover token-weighted
 equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
 agreement. CUDA and mixed-device performance remain unqualified. Host loops,
-checkpoints, scheduling and packed-batch construction aren't part of this module.
+checkpoints, scheduling and packed-batch construction aren't part of `step`.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
+
+`classification_run.run` is the bounded single-device host lifecycle for
+hard-label sequence updates. It JIT-compiles the supplied logical update,
+passes fixed `[M, B, T]` batches from host records, checkpoints the complete
+state after committed updates, and resumes deterministic epoch shuffles from
+the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each
+invocation. An optional callback runs at checkpoint boundaries for product
+gameplay; its metrics and a report callback are caller-owned. A requested TPU
+must be the sole visible JAX device or startup fails clearly. The caller
+supplies an explicit persistent checkpoint path. CPU tests cover save/restore,
+cursor advance, callback boundaries, and TPU absence. TPU compilation,
+throughput, and full-model gameplay remain unverified here.
