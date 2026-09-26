@@ -151,3 +151,151 @@ def test_bad_batch_structure_rejected() -> None:
     update = step.make_step(_terms, inventory, config)
     with pytest.raises(ValueError, match="common leading axis"):
         update(initial, {"x": jnp.ones((2, 1))}, jnp.asarray([True]))
+
+
+@pytest.mark.parametrize("fuse_accumulation", [False, True])
+def test_streaming_matches_scanned_update_and_skips_inactive(
+    fuse_accumulation: bool,
+) -> None:
+    """Both streaming programs preserve count-weighted AdamW semantics."""
+    inventory, config, initial = _setup()
+    physical = _batch()
+    scanned = step.make_step(_terms, inventory, config)(
+        initial, physical, jnp.asarray([True, True])
+    )
+    scanned_values = jax.tree.map(
+        lambda value: np.asarray(value).copy(), scanned
+    )
+    _, _, fresh_initial = _setup()
+    streamed = step.make_streaming_step(
+        _terms, inventory, config, fuse_accumulation=fuse_accumulation
+    )(fresh_initial, physical, jnp.asarray([True, True]))
+    assert bool(streamed.committed)
+    np.testing.assert_allclose(streamed.loss, scanned_values.loss, rtol=1e-6)
+    for group in ("params", "m", "v"):
+        for name in initial[group]:
+            np.testing.assert_allclose(
+                streamed.state[group][name],
+                scanned_values.state[group][name],
+                rtol=1e-6,
+            )
+
+    _, _, second_initial = _setup()
+    physical["x"] = physical["x"].at[1].set(jnp.nan)
+    skipped = step.make_streaming_step(
+        _terms, inventory, config, fuse_accumulation=fuse_accumulation
+    )(second_initial, physical, jnp.asarray([True, False]))
+    assert bool(skipped.committed)
+    np.testing.assert_allclose(skipped.loss, 9.0)
+
+
+def test_fused_accumulation_reuses_donated_state_across_updates() -> None:
+    """The fused sum agrees with separate addition for consecutive commits."""
+    inventory, config, baseline_state = _setup()
+    _, _, fused_state = _setup()
+    baseline = step.make_streaming_step(_terms, inventory, config)
+    fused = step.make_streaming_step(
+        _terms, inventory, config, fuse_accumulation=True
+    )
+    assert fused.accumulate is not None
+    for _ in range(2):
+        baseline_result = baseline(
+            baseline_state, _batch(), np.asarray([True, True])
+        )
+        fused_result = fused(fused_state, _batch(), np.asarray([True, True]))
+        assert bool(baseline_result.committed)
+        assert bool(fused_result.committed)
+        np.testing.assert_allclose(
+            fused_result.loss, baseline_result.loss, rtol=1e-6
+        )
+        for group in ("params", "m", "v"):
+            for name in baseline_result.state[group]:
+                np.testing.assert_allclose(
+                    fused_result.state[group][name],
+                    baseline_result.state[group][name],
+                    rtol=1e-6,
+                    atol=1e-7,
+                )
+        baseline_state = baseline_result.state
+        fused_state = fused_result.state
+    assert int(fused_state["step"]) == 2
+
+
+@pytest.mark.parametrize("bad_count", [-1.0, float("nan"), float("inf")])
+def test_fused_accumulation_rejects_invalid_later_count(
+    bad_count: float,
+) -> None:
+    """One invalid physical count rejects even when the total stays positive."""
+    inventory, config, initial = _setup()
+    snapshot = jax.tree.map(lambda value: np.asarray(value).copy(), initial)
+
+    def counted_terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Provide a differentiable loss and an independent target count."""
+        return params["weight"] * batch["x"][0], batch["count"][0]
+
+    result = step.make_streaming_step(
+        counted_terms, inventory, config, fuse_accumulation=True
+    )(
+        initial,
+        {
+            "x": jnp.ones((2, 1), dtype=jnp.float32),
+            "count": jnp.asarray([[3.0], [bad_count]], dtype=jnp.float32),
+        },
+        np.asarray([True, True]),
+    )
+    assert not bool(result.committed)
+    assert int(result.code) == adamw.CommitCode.ACCUMULATION_INVALID
+    _same_state(result.state, snapshot)
+
+
+def test_fused_accumulation_rejects_invalid_later_gradient() -> None:
+    """A later NaN derivative rejects a finite summed loss and count."""
+    inventory, config, initial = _setup()
+    snapshot = jax.tree.map(lambda value: np.asarray(value).copy(), initial)
+
+    def bad_gradient_terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Choose a finite primal with a poisoned derivative in slot 2."""
+        weight = params["weight"]
+        feature = batch["x"][0]
+        loss = jax.lax.cond(
+            feature < 0,
+            lambda _: jnp.sqrt(weight - weight),
+            lambda _: weight * feature,
+            None,
+        )
+        return loss, jnp.float32(1)
+
+    result = step.make_streaming_step(
+        bad_gradient_terms, inventory, config, fuse_accumulation=True
+    )(
+        initial,
+        {"x": jnp.asarray([[1.0], [-1.0]], dtype=jnp.float32)},
+        np.asarray([True, True]),
+    )
+    assert not bool(result.committed)
+    assert int(result.code) == adamw.CommitCode.NONFINITE_GRADIENT
+    np.testing.assert_allclose(result.loss, 1.0)
+    _same_state(result.state, snapshot)
+
+
+def test_streaming_rejects_invalid_count_without_committing() -> None:
+    """A bad physical count leaves every donated input leaf recoverable."""
+    inventory, config, initial = _setup()
+    snapshot = jax.tree.map(lambda value: np.asarray(value).copy(), initial)
+
+    def bad_terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Expose a finite gradient paired with an invalid count."""
+        return params["weight"] * batch["x"][0], jnp.float32(-1)
+
+    result = step.make_streaming_step(bad_terms, inventory, config)(
+        initial, {"x": jnp.ones((1, 1))}, jnp.asarray([True])
+    )
+    assert not bool(result.committed)
+    assert int(result.code) == adamw.CommitCode.ACCUMULATION_INVALID
+    _same_state(result.state, snapshot)

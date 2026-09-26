@@ -1,5 +1,7 @@
 """Checkpoint loading contract for the LFM2.5 model adapter."""
 
+from typing import cast
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -41,6 +43,54 @@ def test_loads_full_inventory_and_runs() -> None:
     logits = model.forward(params, ids, mask, cfg)
     assert logits.shape == (2, 4, cfg.vocab_size)
     assert logits.dtype == jnp.float32
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
+def test_block_rematerialization_preserves_forward_and_gradients(
+    dtype: type[np.generic],
+) -> None:
+    """Both block policies agree for a model with convolution and attention."""
+    cfg = _config()
+    params = _checkpoint(cfg, seed=3)
+    ids = jnp.asarray([[1, 2, 3, 4], [4, 3, 2, 1]], dtype=jnp.int32)
+    mask = jnp.asarray([[1, 1, 1, 1], [1, 1, 1, 0]], dtype=jnp.int32)
+
+    def output_and_gradient(
+        rematerialize_blocks: bool,
+    ) -> tuple[jax.Array, dict[str, jax.Array]]:
+        """Differentiate one full-model scalar through the selected policy."""
+
+        def scored(parameters: dict[str, jax.Array]) -> jax.Array:
+            """Weight logits by token position so every row contributes."""
+            values = model.forward(
+                parameters,
+                ids,
+                mask,
+                cfg,
+                dtype=dtype,
+                rematerialize_blocks=rematerialize_blocks,
+            )
+            return jnp.sum(values * jnp.arange(1, 5)[None, :, None])
+
+        return cast(
+            tuple[jax.Array, dict[str, jax.Array]],
+            jax.jit(jax.value_and_grad(scored))(params),
+        )
+
+    checkpointed, checkpointed_grad = output_and_gradient(True)
+    plain, plain_grad = output_and_gradient(False)
+    np.testing.assert_array_equal(checkpointed, plain)
+    assert checkpointed_grad.keys() == plain_grad.keys()
+    maximum_relative_error = 1e-6 if dtype == jnp.float32 else 0.025
+    for name in checkpointed_grad:
+        original = np.asarray(checkpointed_grad[name], dtype=np.float64)
+        changed = np.asarray(plain_grad[name], dtype=np.float64)
+        assert np.isfinite(original).all()
+        assert np.isfinite(changed).all()
+        relative_error = float(np.linalg.norm(original - changed)) / max(
+            float(np.linalg.norm(original)), 1e-12
+        )
+        assert relative_error <= maximum_relative_error, name
 
 
 def test_hf_config_dict_loads() -> None:

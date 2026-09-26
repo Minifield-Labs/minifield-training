@@ -37,4 +37,20 @@ The tiny CPU fixture verifies finite shared-engine updates, a changed head,
 bit-identical frozen embeddings, and safe masked padding labels. It doesn't
 qualify the full pretrained model or TPU speed.
 
+`make_lfm2_5_streaming_step(..., rematerialize_blocks=False)` lets a training
+run compare ordinary block autodiff with the default checkpointed block
+autodiff. The flag applies to the complete-sequence model path; prefix,
+suffix, and packed paths keep their existing checkpoint policy. Both choices
+retain the same forward mathematics. CPU conv and attention fixtures show
+bit-identical outputs, FP32 gradient agreement within 1e-6 relative error per
+leaf, and BF16 gradient error bounded by 2.5% per leaf in that fixture from
+floating-point evaluation order. The plain path retains more activations and
+may exceed device memory. TPU memory, gradient drift, and speed require a
+measured run before selecting it by default.
+
+`make_lfm2_5_streaming_step(..., fuse_accumulation=True)` also exposes the
+shared engine's fused gradient sum. It removes separate add programs after
+the first active microbatch. This path is opt-in until v5e memory and speed
+are measured.
+
 The executable dependency policy is [architecture.toml](../../../architecture.toml).

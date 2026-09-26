@@ -6,8 +6,10 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import time
 from typing import cast
 
+import jax
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
 from examples.tetris.evaluate import ALLOWED
@@ -102,6 +104,10 @@ def source_identity(
         "rows": args.rows,
         "allowed": ALLOWED,
     }
+    if args.no_remat:
+        settings["rematerialize_blocks"] = False
+    if args.fuse_accumulation:
+        settings["fuse_accumulation"] = True
     return hashlib.sha256(json_io.canonical(settings).encode()).hexdigest()
 
 
@@ -209,15 +215,25 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=2)
     parser.add_argument("--data-seed", type=int, default=17)
     parser.add_argument("--head-seed", type=int, default=6)
+    parser.add_argument("--no-remat", action="store_true")
+    parser.add_argument("--fuse-accumulation", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=0.0001)
-    parser.add_argument("--checkpoint-every", type=int, default=200)
+    parser.add_argument("--checkpoint-every", type=int, default=5000)
     parser.add_argument("--report-every", type=int, default=10)
-    parser.add_argument("--eval-games", type=int, default=2)
+    parser.add_argument("--eval-games", type=int, default=0)
     parser.add_argument("--eval-max-ticks", type=int, default=2000)
     parser.add_argument("--eval-seed", type=int, default=900)
+    parser.add_argument("--profile-dir", type=Path)
     args = parser.parse_args()
     if not args.checkpoint_root.is_absolute():
         raise ValueError("Checkpoint root must be an explicit absolute path")
+    if args.profile_dir is not None and (
+        not args.profile_dir.is_absolute()
+        or args.max_steps is None
+        or not 4 <= args.max_steps <= 50
+        or args.max_hours is not None
+    ):
+        raise ValueError("Profiling needs a separate 4-50 update run")
     classification_run.require_single_device(args.platform)
     cfg, tokenizer = load_model_metadata(args.model_dir)
     data_sha256, examples = load_dataset(args.dataset)
@@ -263,8 +279,14 @@ def main() -> None:
                 flush=True,
             )
             return
-    update = classification.make_lfm2_5_step(
-        cfg, ALLOWED, inventory, optimizer, attention_backend="dense"
+    update = classification.make_lfm2_5_streaming_step(
+        cfg,
+        ALLOWED,
+        inventory,
+        optimizer,
+        attention_backend="dense",
+        rematerialize_blocks=not args.no_remat,
+        fuse_accumulation=args.fuse_accumulation,
     )
     config = classification_run.RunConfig(
         microbatches=args.microbatches,
@@ -296,23 +318,60 @@ def main() -> None:
         else None
     )
 
-    def report(message: dict[str, float | str]) -> None:
-        """Emit bounded scalar progress and artifact paths as JSON."""
-        print(json_io.canonical(message), flush=True)
+    tracing = False
 
-    classification_run.run(
-        examples,
-        full_state,
-        update,
-        inventory,
-        config,
-        checkpoint_root=args.checkpoint_root,
-        optimizer_id=optimizer.implementation_identity,
-        cursor=cursor,
-        evaluate=evaluator,
-        report=report,
-        required_platform=args.platform,
+    def report(message: dict[str, float | str]) -> None:
+        """Emit scalar progress and start a bounded post-compile trace."""
+        nonlocal tracing
+        print(json_io.canonical(message), flush=True)
+        if args.profile_dir is not None and "first_update_seconds" in message:
+            jax.profiler.start_trace(
+                args.profile_dir, create_perfetto_trace=False
+            )
+            tracing = True
+
+    report(
+        {
+            "event": "first_update_ready",
+            "step": float(cursor.next_batch),
+            "microbatches": float(args.microbatches),
+            "rows": float(args.rows),
+            "sequence_length": float(args.sequence_length),
+            "rematerialize_blocks": float(not args.no_remat),
+            "fuse_accumulation": float(args.fuse_accumulation),
+        }
     )
+    run_started = time.monotonic()
+    try:
+        _, final_cursor = classification_run.run(
+            examples,
+            full_state,
+            update,
+            inventory,
+            config,
+            checkpoint_root=args.checkpoint_root,
+            optimizer_id=optimizer.implementation_identity,
+            cursor=cursor,
+            evaluate=evaluator,
+            report=report,
+            required_platform=args.platform,
+            annotate_steps=args.profile_dir is not None,
+        )
+    finally:
+        if tracing:
+            jax.profiler.stop_trace()  # type: ignore[no-untyped-call]
+    elapsed = time.monotonic() - run_started
+    updates = final_cursor.next_batch - cursor.next_batch
+    report(
+        {
+            "event": "run_complete",
+            "updates": float(updates),
+            "elapsed_seconds": elapsed,
+            "end_to_end_updates_per_second": updates / elapsed,
+        }
+    )
+    if args.profile_dir is not None:
+        report({"profile": str(args.profile_dir)})
 
 
 if __name__ == "__main__":

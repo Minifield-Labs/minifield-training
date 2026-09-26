@@ -19,3 +19,5 @@ checks token range, length, allowed label, and duplicate IDs before yielding
 fixed `[M, B, T]` input/mask arrays plus `[M, B]` labels and valid-row mask.
 Partial rows can carry a masked padding label safely. The seeded shuffle and
 `start_update` identify a repeatable update boundary within one epoch.
+The boolean `active[M]` vector stays on the host for the streaming step's slot
+selection; the model inputs, masks, labels, and valid-row mask are JAX arrays.

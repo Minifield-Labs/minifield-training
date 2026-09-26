@@ -1,6 +1,9 @@
 """Fixed-shape labeled sequence admission and cursor checks."""
 
+import jax
+import jax.numpy as jnp
 import numpy as np
+from numpy.typing import NDArray
 import pytest
 
 from minifield_training.batching import classification
@@ -38,6 +41,35 @@ def test_padded_decision_batches_preserve_records() -> None:
     for slot, row_id in enumerate(batch.example_ids):
         ids = expected[row_id]
         assert tuple(physical[slot, : len(ids)]) == ids
+
+
+def test_active_flags_stay_on_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch construction doesn't place the host slot-selection vector."""
+    asarray = jnp.asarray
+
+    def reject_active_conversion(value: NDArray[np.generic]) -> jax.Array:
+        """Catch an active-vector conversion while allowing model inputs."""
+        if value.shape == (2,) and value.dtype == np.dtype(np.bool_):
+            raise AssertionError("active flags were placed on device")
+        return asarray(value)
+
+    monkeypatch.setattr(jnp, "asarray", reject_active_conversion)
+    batch = next(
+        classification.iter_updates(
+            [LabeledSequence("a", "ep", (1,), 0)],
+            microbatches=2,
+            rows_per_microbatch=1,
+            sequence_length=2,
+            pad_token_id=0,
+            vocab_size=3,
+            allowed_classes=(True,),
+            padding_label=0,
+            seed=0,
+        )
+    )
+    assert isinstance(batch.active, np.ndarray)
+    assert batch.active.dtype == np.dtype(np.bool_)
+    assert batch.active.tolist() == [True, False]
 
 
 def test_rejects_masked_class_and_overlength() -> None:

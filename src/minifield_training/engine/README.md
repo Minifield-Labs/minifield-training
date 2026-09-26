@@ -25,13 +25,39 @@ contracts, and leading dimensions raise `ValueError` at tracing time.
 The update is compatible with `jax.jit`. FP32 masters, moments, accumulated
 loss, gradients and count are retained. CPU synthetic tests cover token-weighted
 equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
-agreement. CUDA and mixed-device performance remain unqualified. Host loops,
-checkpoints, scheduling and packed-batch construction aren't part of `step`.
+agreement. CUDA and mixed-device performance remain unqualified. Checkpoints,
+epoch scheduling and packed-batch construction aren't part of `step`.
+
+`step.make_streaming_step` keeps the same loss/count and AdamW contract for a
+single-device run, but compiles one physical gradient, device-side addition,
+normalization, and donated commit as separate programs. The host selects active
+microbatches and never reads gradient values. This bounds the compiled reverse
+pass to one physical batch instead of embedding it inside a full-model scan.
+The classifier runner calls this form directly; other logical steps retain the
+scanned JIT path.
+The donated optimizer consumes its input buffers, including on a rejected
+commit. Continue from the returned `CommitResult.state` in either case.
+
+The classifier runner reports the first update's wall time separately because
+it can include compilation. `warm_updates_per_second` divides later committed
+updates by their summed update-call time; it excludes batch construction,
+checkpoints, gameplay and the first update. `last_update_seconds` is the most
+recent update-call time. Pass `annotate_steps=True` to label every update with
+its global `train` step number in a JAX trace, including resumed updates.
+The runner never starts or exports a trace. Callers choose the capture window;
+the Tetris example restricts it to a short run and exports after the final
+checkpoint. Profiling output stays in the caller's configured directory.
+
+`step.make_streaming_step(..., fuse_accumulation=True)` combines each later
+physical gradient with the existing sum in one donated JIT program. The
+default keeps gradient and addition separate. The fused path has CPU numerical
+coverage, but its v5e memory peak and speed remain unmeasured.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
 `classification_run.run` is the bounded single-device host lifecycle for
-hard-label sequence updates. It JIT-compiles the supplied logical update,
+hard-label sequence updates. It JIT-compiles a scanned logical update or calls
+the already compiled stages of a streaming update,
 passes fixed `[M, B, T]` batches from host records, checkpoints the complete
 state after committed updates, and resumes deterministic epoch shuffles from
 the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each

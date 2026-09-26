@@ -433,12 +433,17 @@ def _hidden_states(
     *,
     dtype: types.DType,
     attention_backend: str,
+    rematerialize_blocks: bool,
 ) -> jax.Array:
     """Decode from one complete FP32 parameter pytree."""
     hidden = parameters["model.embed_tokens.weight"][ids].astype(dtype)
     for index, kind in enumerate(cfg.layer_types):
-        rematerialize = jax.checkpoint  # type: ignore[attr-defined]
-        hidden = rematerialize(_block, static_argnums=(3, 4, 5))(
+        block = _block
+        if rematerialize_blocks:
+            block = jax.checkpoint(  # type: ignore[attr-defined]
+                _block, static_argnums=(3, 4, 5)
+            )
+        hidden = block(
             hidden,
             layer_weights(parameters, index),
             attention_mask,
@@ -549,12 +554,15 @@ def hidden_states(
     *,
     dtype: types.DType = jnp.bfloat16,
     attention_backend: str = "dense",
+    rematerialize_blocks: bool = True,
 ) -> jax.Array:
     """Decode batches from fully trainable FP32 masters.
 
     With ``attention_backend="cudnn"`` each row's valid tokens must form a
     contiguous suffix-padded prefix; the dense backend accepts arbitrary
-    binary masks.
+    binary masks. ``rematerialize_blocks=False`` retains block activations
+    for backward instead of recomputing them; it only applies to this full
+    sequence path.
     """
     validate_parameters(parameters, cfg)
     return _hidden_states(
@@ -564,6 +572,7 @@ def hidden_states(
         cfg,
         dtype=dtype,
         attention_backend=attention_backend,
+        rematerialize_blocks=rematerialize_blocks,
     )
 
 
@@ -827,7 +836,15 @@ def forward(
     cfg: Config,
     *,
     dtype: types.DType = jnp.bfloat16,
+    rematerialize_blocks: bool = True,
 ) -> jax.Array:
     """Return dense diagnostic logits from the complete trainable pytree."""
-    hidden = hidden_states(parameters, ids, attention_mask, cfg, dtype=dtype)
+    hidden = hidden_states(
+        parameters,
+        ids,
+        attention_mask,
+        cfg,
+        dtype=dtype,
+        rematerialize_blocks=rematerialize_blocks,
+    )
     return logits(hidden, parameters, cfg)
