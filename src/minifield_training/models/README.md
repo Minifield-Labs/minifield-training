@@ -31,3 +31,8 @@ before the 132 BF16 backbone tensors become FP32 masters. The source is covered
 by Liquid AI's LFM Open License v1.0. This repository doesn't redistribute its
 weights or tokenizer. Forward numerical parity against the released weights is
 still unverified here.
+
+`lfm2_5.model.projection_names(cfg)` lists the exact attention, feed-forward,
+and convolution projection matrices in this model's expected inventory.
+Quantization strategies use it to select candidates before JIT; embeddings,
+output heads, norms, and depthwise taps aren't candidates.

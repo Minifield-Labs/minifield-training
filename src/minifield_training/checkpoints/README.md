@@ -16,6 +16,11 @@ initializes fresh moments; a resume loads all saved tensors and the cursor.
 The writer makes each host tensor contiguous before safetensors serialization,
 including strided accelerator transfers such as convolution weights, while
 preserving scalar shapes.
+`load_warm_start_masters` can explicitly admit a full-state tensor file named
+`model.safetensors` when a prior checkpoint used that filename. It verifies
+the same manifest hash, exact tensor inventory, and cursor identities before
+returning only FP32 masters. Ordinary `load` still reads
+`state.safetensors` for exact continuation.
 Checkpoint paths must be on persistent storage when used in Colab. The caller
 chooses storage and never overwrites an existing checkpoint directory.
 
@@ -25,3 +30,13 @@ imports stay dependency-free.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 Document each added public contract, consumer, example, and test here.
+
+`inference_output.OutputStrategy` is separate from resumable full-state
+checkpoints. `DenseEffectiveOutput` writes already-effective FP32 tensors to
+one immutable safetensors weight asset with `format=pt`, source lineage,
+inventory identity, and optional quantization lineage. It validates exact
+keys, shapes, dtype, and finiteness, then makes strided values contiguous.
+The runtime dense weight path can read this format. This asset isn't a complete
+runtime bundle; config/tokenizer packaging and admission remain separate.
+It doesn't reduce storage size. Mixed dense embeddings plus packed projections
+need a future runtime per-tensor precision contract.

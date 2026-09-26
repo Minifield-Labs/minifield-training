@@ -104,6 +104,28 @@ def load(
     source_id: str,
 ) -> tuple[state.State, Cursor]:
     """Restore exact FP32 state only for matching run, source, and data."""
+    return _load(
+        directory,
+        inventory,
+        optimizer_id=optimizer_id,
+        run_id=run_id,
+        data_sha256=data_sha256,
+        source_id=source_id,
+        tensor_filename="state.safetensors",
+    )
+
+
+def _load(
+    directory: Path,
+    inventory: core_parameters.FullParameterInventory,
+    *,
+    optimizer_id: str,
+    run_id: str,
+    data_sha256: str,
+    source_id: str,
+    tensor_filename: str,
+) -> tuple[state.State, Cursor]:
+    """Verify one full-state tensor file against its manifest and identities."""
     raw: object = json.loads(
         (directory / "manifest.json").read_text(encoding="utf-8")
     )
@@ -149,7 +171,7 @@ def load(
         source_id,
     ):
         raise ValueError("Checkpoint run/data/source identity mismatch")
-    tensor_path = directory / "state.safetensors"
+    tensor_path = directory / tensor_filename
     if json_io.digest_file(tensor_path) != manifest["tensor_sha256"]:
         raise ValueError("Checkpoint tensor SHA-256 mismatch")
     arrays = load_file(str(tensor_path))
@@ -181,3 +203,39 @@ def load(
     }
     adamw.validate_full_weight_state(restored, inventory)
     return restored, cursor
+
+
+def load_warm_start_masters(
+    directory: Path,
+    inventory: core_parameters.FullParameterInventory,
+    *,
+    run_id: str,
+    data_sha256: str,
+    source_id: str,
+    tensor_filename: str = "state.safetensors",
+) -> dict[str, jax.Array]:
+    """Admit a prior full checkpoint and return only verified FP32 masters.
+
+    The prior optimizer identity is read from its manifest solely to verify
+    that checkpoint through ``load``. The caller starts a new optimizer and
+    cursor; this path never claims exact optimizer continuation.
+    """
+    raw: object = json.loads(
+        (directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(raw, dict) or not isinstance(
+        raw.get("optimizer_id"), str
+    ):
+        raise ValueError("Invalid warm-start checkpoint manifest")
+    if tensor_filename not in {"state.safetensors", "model.safetensors"}:
+        raise ValueError("Unsupported warm-start tensor filename")
+    restored, _ = _load(
+        directory,
+        inventory,
+        optimizer_id=raw["optimizer_id"],
+        run_id=run_id,
+        data_sha256=data_sha256,
+        source_id=source_id,
+        tensor_filename=tensor_filename,
+    )
+    return restored["params"]

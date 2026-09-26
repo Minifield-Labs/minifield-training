@@ -14,9 +14,11 @@ from examples.polyomino import engine
 from examples.polyomino import serialize
 from examples.polyomino import source
 from minifield_training.checkpoints import training_state
+from minifield_training.core import parameters as core_parameters
 from minifield_training.models.lfm2_5 import model
 from minifield_training.optimizers import state as optimizer_state
 from minifield_training.strategies import classification
+from minifield_training.strategies import quantization
 
 ALLOWED = (True, True, True, True, True, True, True, False)
 
@@ -30,6 +32,8 @@ def make_evaluator(
     max_ticks: int,
     seed: int,
     replay_dir: Path | None = None,
+    inventory: core_parameters.FullParameterInventory | None = None,
+    quantization_strategy: quantization.QuantizationPlan | None = None,
 ) -> Callable[[optimizer_state.State, int], dict[str, float]]:
     """Compile greedy learned-policy scoring once for periodic game rollouts."""
     if min(sequence_length, games, max_ticks) < 1:
@@ -41,7 +45,12 @@ def make_evaluator(
     ) -> jax.Array:
         """Choose an engine action from classifier logits alone."""
         return classification.predict(
-            params, ids, mask, cfg, ALLOWED, dtype=jnp.bfloat16
+            params,
+            ids,
+            mask,
+            cfg,
+            ALLOWED,
+            dtype=jnp.bfloat16,
         )
 
     def evaluate(
@@ -50,7 +59,16 @@ def make_evaluator(
         """Run until each seeded game dies or hits its explicit tick cap."""
         # Gameplay batches can be smaller than the training mesh. Score them
         # on one device, using one copy of the replicated training parameters.
-        params = jax.device_put(full_state["params"], jax.local_devices()[0])
+        if quantization_strategy is not None and inventory is None:
+            raise ValueError("QAT evaluation requires inventory")
+        effective = (
+            quantization.apply(
+                full_state["params"], inventory, quantization_strategy
+            )
+            if inventory is not None
+            else full_state["params"]
+        )
+        params = jax.device_put(effective, jax.local_devices()[0])
         states = [engine.Game(seed + index) for index in range(games)]
         active = np.ones(games, dtype=np.bool_)
         frames: list[str] = []
@@ -129,12 +147,19 @@ def main() -> None:
         help="Training device count for checkpoint identity; scoring uses one",
     )
     parser.add_argument("--learning-rate", type=float, default=0.0001)
+    parser.add_argument(
+        "--quantization", choices=("dense", "ternary", "nf4"), default="dense"
+    )
     args = parser.parse_args()
     cfg, tokenizer = train.load_model_metadata(args.model_dir)
-    inventory = classification.parameter_inventory(cfg, ALLOWED)
+    qat = train.quantization_strategy(cfg, args.quantization)
+    inventory = classification.parameter_inventory(cfg, ALLOWED, qat)
     optimizer = train.optimizer_config(args.learning_rate)
     source_id = train.source_identity(
-        args, cfg, sequence_length=args.sequence_length
+        args,
+        cfg,
+        sequence_length=args.sequence_length,
+        quantization_kind=qat.identity if qat is not None else None,
     )
     full_state, cursor = training_state.load(
         args.checkpoint,
@@ -152,6 +177,8 @@ def main() -> None:
         max_ticks=args.max_ticks,
         seed=args.seed,
         replay_dir=args.replay_dir,
+        inventory=inventory,
+        quantization_strategy=qat,
     )
     print(json.dumps(callback(full_state, cursor.next_batch)), flush=True)
 

@@ -86,3 +86,7 @@ inspection remains unimplemented.
 
 Tests: `uv run --no-sync pytest tests/core/` covers record views and immutability,
 explicit decay selection, rejected memberships, FP32 masters and digest changes.
+
+`quantization.QuantizationStrategy` is the host-safe selection protocol. It
+resolves exact names against an inventory and caller-supplied semantic roles
+before numerical tracing. Existing dense identity is unchanged.

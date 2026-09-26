@@ -70,3 +70,18 @@ agreement on a tiny conv/attention classifier, including fully padded replicas.
 Full Base-model TPU memory and throughput still require hardware evidence.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
+
+## Optional QAT composition
+
+`quantization.QuantizationPlan` is the injected selection and numerical
+contract; `NamedQuantization` combines exact names with a numerical quantizer.
+Classification assigns semantic roles from model-owned projection
+names and rejects embeddings, output heads, norms, depthwise taps, frozen
+leaves, and incompatible shapes before JIT. Resolved names and quantizer
+identity enter the inventory hash, so exact resume rejects a changed plan.
+The dense default preserves existing identity.
+
+Classification training, prediction, and SFT training pass the same effective
+weights into model forward. FP32 masters and Adam moments stay unquantized.
+This first recipe applies full fake quantization from update 1. A ramp schedule
+and TPU qualification need separate evidence.
