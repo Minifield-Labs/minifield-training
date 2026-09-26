@@ -72,7 +72,7 @@ single-line-exclusions = ["typing", "collections.abc"]
 python_version = "3.12"
 strict = true
 explicit_package_bases = true
-files = ["src", "scripts", "tests"]
+files = ["src", "scripts", "tests", "examples"]
 warn_unreachable = true
 mypy_path = ["src"]
 
