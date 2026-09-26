@@ -25,7 +25,86 @@ contracts, and leading dimensions raise `ValueError` at tracing time.
 The update is compatible with `jax.jit`. FP32 masters, moments, accumulated
 loss, gradients and count are retained. CPU synthetic tests cover token-weighted
 equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
-agreement. CUDA and mixed-device performance remain unqualified. Host loops,
-checkpoints, scheduling and packed-batch construction aren't part of this module.
+agreement. CUDA and mixed-device performance remain unqualified. Checkpoints,
+epoch scheduling and packed-batch construction aren't part of `step`.
+
+`step.make_streaming_step` keeps the same loss/count and AdamW contract for a
+single-device run, but compiles one physical gradient, device-side addition,
+normalization, and donated commit as separate programs. The host selects active
+microbatches and never reads gradient values. This bounds the compiled reverse
+pass to one physical batch instead of embedding it inside a full-model scan.
+The training runner calls this form directly when supplied a streaming step;
+other logical steps retain the scanned JIT path.
+The donated optimizer consumes its input buffers, including on a rejected
+commit. Continue from the returned `CommitResult.state` in either case.
+
+The training runner reports the first update's wall time separately because
+it can include compilation. `warm_updates_per_second` divides later committed
+updates by their summed update-call time; it excludes batch construction,
+checkpoints, gameplay and the first update. `last_update_seconds` is the most
+recent update-call time. Pass `annotate_steps=True` to label every update with
+its global `train` step number in a JAX trace, including resumed updates.
+The runner never starts or exports a trace. Callers choose the capture window;
+the Polyomino example restricts it to a short run and exports after the final
+checkpoint. Profiling output stays in the caller's configured directory.
+
+`step.make_streaming_step(..., fuse_accumulation=True)` combines each later
+physical gradient with the existing sum in one donated JIT program. The
+default keeps gradient and addition separate. The fused path has CPU numerical
+coverage, but its v5e memory peak and speed remain unmeasured.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
+
+`training_run.run` is the bounded single-host lifecycle for
+caller-supplied supervision. It JIT-compiles a scanned logical update or calls
+the already compiled stages of a streaming update,
+consumes physical updates through batching protocols, checkpoints the complete
+state after committed updates, and resumes deterministic epoch shuffles from
+the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each
+invocation. An optional callback runs at checkpoint boundaries for product
+gameplay; its metrics and a report callback are caller-owned. The default
+requires one visible device; a streaming step's optional mesh must contain
+all visible devices on one host. A requested platform must match every device.
+The caller
+supplies an explicit persistent checkpoint path. CPU tests cover save/restore,
+cursor advance, callback boundaries, and TPU absence. TPU compilation,
+throughput, and full-model gameplay remain unverified here.
+
+`step.make_streaming_step(..., mesh=mesh)` accepts a one-dimensional mesh
+named `data`. Every physical batch array has a leading global row dimension
+divisible by the device count. `jax.shard_map` splits rows, differentiates
+replica-local parameters, and sums loss, count, and gradients across devices.
+The explicit `pvary` before differentiation avoids VMA autodiff performing
+another gradient reduction. Invalid counts on any replica reject the complete
+update. Normalization and AdamW still happen once per logical update. Masters,
+moments, and scalar step remain fully replicated with their original logical
+shapes, so checkpoints retain the existing format. Direct callers must place
+state on the replicated mesh; `training_run.run` does this at startup/restore.
+
+`tests/engine/test_data_parallel.py` launches a fresh process with 8 CPU
+devices. It checks analytical loss/Adam values, uneven padding, empty and
+invalid counts, frozen leaves, fused accumulation, all replica copies, and
+saved-next-update equivalence. Tiny conv/attention classification gradients
+are compared with the single-device implementation using FP32 (1e-6 relative
+L2 error per leaf) and BF16 (2.5%) computation, both with FP32 masters.
+These checks don't qualify TPU compilation, memory, or throughput.
+
+For finite records, supply `examples` and a `batch_strategy` implementing
+`batching.contracts.BatchStrategy[RecordT]`. The runner owns epoch seeds and the
+global update cursor; the strategy owns physical shape and supervision.
+`RunConfig` contains only replay seed, cadence and run bounds. SFT and
+classification use the same runner without a task-specific import.
+
+For a replayable stream, pass `examples=None` and a `batch_source` implementing
+`batching.contracts.BatchSource`. Its `__call__(next_batch, deadline)` receives
+the global update index and an absolute `time.monotonic()` deadline or `None`.
+The callback returns an iterator of
+`batching.contracts.PhysicalUpdate` values starting at that global logical
+update index. It must produce the same unread updates after restore, keep
+record identities unique, and provide enough batches to reach the run's
+step or time bound. It must stop waiting for input at the deadline. The
+runner saves committed work before closing the iterator on a normal stop, and
+raises if the source ends early. Finite `examples` keep their seeded epoch
+behavior; passing both input modes is an error. The checkpoint cursor
+identifies the next unread update. Its data/source IDs must identify the
+source and deterministic settings as well as any stored inputs.

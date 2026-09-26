@@ -9,6 +9,7 @@ from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import model
 from minifield_training.objectives import loss
 from minifield_training.optimizers import adamw
+from minifield_training.strategies import quantization
 
 
 def make_lfm2_5_step(
@@ -17,15 +18,25 @@ def make_lfm2_5_step(
     optimizer: adamw.AdamWConfig,
     *,
     dtype: types.DType = jnp.bfloat16,
+    quantization_strategy: quantization.QuantizationPlan | None = None,
 ) -> step.LogicalStep:
     """Compose dense model forward with summed causal NLL and AdamW."""
+    projection_names = model.projection_names(cfg)
+    quantization.validate_plan(
+        inventory,
+        quantization_strategy,
+        {
+            name: "projection" if name in projection_names else "other"
+            for name in inventory.names
+        },
+    )
 
     def loss_terms(
         parameters: types.Parameters, batch: types.DeviceBatch
     ) -> tuple[jax.Array, jax.Array]:
         """Return supervised next-token loss and count for one batch."""
         logits = model.forward(
-            parameters,
+            quantization.apply(parameters, inventory, quantization_strategy),
             batch["input_ids"],
             batch["attention_mask"],
             cfg,

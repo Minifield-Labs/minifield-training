@@ -296,6 +296,38 @@ def test_negative_variance_aborts() -> None:
     assert int(result.code) == adamw.CommitCode.INVALID_STATE
 
 
+@pytest.mark.parametrize(
+    ("variance", "valid"),
+    [
+        (np.float32(0.25), True),
+        (np.float32(0.0), True),
+        (np.float32(-0.0), True),
+        (np.float32(-0.25), False),
+        (np.float32(np.nan), False),
+        (np.float32(np.inf), False),
+        (np.float32(-np.inf), False),
+    ],
+)
+def test_second_moment_device_validation_matches_commit(
+    variance: np.float32, valid: bool
+) -> None:
+    """Reject non-finite or negative variance, while accepting signed zero."""
+    full_state = _make_state()
+    variances = dict(full_state["v"])
+    variances["w.vector"] = jnp.asarray(
+        [variance, 0.0, 0.03], dtype=jnp.float32
+    )
+    incoming: state.State = {**full_state, "v": variances}
+    assert bool(adamw.state_values_valid_on_device(incoming)) is valid
+    result = _run(incoming, _gradients())
+    assert bool(result.committed) is valid
+    if valid:
+        assert int(result.code) == adamw.CommitCode.COMMITTED
+    else:
+        assert int(result.code) == adamw.CommitCode.INVALID_STATE
+        _assert_state_unchanged(result, incoming)
+
+
 def test_step_overflow_aborts() -> None:
     """Reject a commit that would exceed the int32 step range."""
     full_state = _make_state()

@@ -9,6 +9,8 @@ Adam moments with bias correction, caller-selected weight decay, frozen-leaf
 passthrough, device-side finite checks, and `CommitCode` rejection
 diagnostics. Both take inventory metadata from `core.parameters`; nothing
 here knows a model family.
+Second moments use one per-leaf device reduction for finite and nonnegative
+values in both incoming-state and candidate checks.
 
 Build metadata with `core.parameters.build_inventory(..., decayed_names=...)`.
 AdamW applies decay exactly where the inventory's `decayed` flag is true;

@@ -27,14 +27,26 @@ uv pip install 'minifield-training[numerical]'
 ```
 
 `kernels`, `layers`, `models`, `objectives` and `optimizers` require that
-extra. The development group resolves the same locked JAX plus NumPy for
+extra. For offline chat-template tokenization, install the pinned `text`
+extra:
+
+```sh
+uv pip install 'minifield-training[text]'
+```
+
+The base wheel continues to import `datasets` without this extra. The development group resolves the same locked JAX plus NumPy for
 independent test oracles, so `uv sync --locked` covers both surfaces locally.
+
+The [Polyomino decision example](examples/polyomino/README.md) runs directly from a
+clone and uses the shared classifier to fine-tune the pinned Base model. Its
+game rules, serializer and gameplay callback stay outside the library wheel.
 
 ## What is enforced
 
 - Explicit dependency directions, model-family isolation, host-safe inspection,
   and rejection of common import-path bypasses.
-- Substantial exact function duplication, Pylint textual similarity, and
+- Copied named record contracts, substantial exact function duplication,
+  Pylint textual similarity, and
   production function/module size limits. See [limits](docs/duplication.md).
 - Pyink, Ruff, Google Pylint, strict Mypy, pytest, local documentation links,
   source archive/wheel builds and an isolated wheel installation.

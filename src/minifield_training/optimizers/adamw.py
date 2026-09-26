@@ -304,12 +304,17 @@ def initialize_state(
     return full_state
 
 
-def _tree_all_finite(values: types.Parameters) -> jax.Array:
-    """Return one device boolean without host transfer or Python coercion."""
-    checks = [
-        jnp.all(jnp.isfinite(value.astype(jnp.float32)))
-        for value in values.values()
-    ]
+def _tree_all_finite(
+    values: types.Parameters, *, nonnegative: bool = False
+) -> jax.Array:
+    """Reduce each leaf's finite and optional nonnegative checks on device."""
+    checks: list[jax.Array] = []
+    for value in values.values():
+        leaf = value.astype(jnp.float32)
+        valid = jnp.isfinite(leaf)
+        if nonnegative:
+            valid = valid & (leaf >= 0)
+        checks.append(jnp.all(valid))
     return jnp.all(jnp.stack(checks))
 
 
@@ -318,15 +323,7 @@ def _moments_valid(full_state: state.State) -> jax.Array:
     return (
         _tree_all_finite(full_state["params"])
         & _tree_all_finite(full_state["m"])
-        & _tree_all_finite(full_state["v"])
-        & jnp.all(
-            jnp.stack(
-                [
-                    jnp.all(value.astype(jnp.float32) >= 0)
-                    for value in full_state["v"].values()
-                ]
-            )
-        )
+        & _tree_all_finite(full_state["v"], nonnegative=True)
     )
 
 
