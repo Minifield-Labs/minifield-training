@@ -30,6 +30,9 @@ implemented capability.
 
 The complete permitted dependency lists live in `architecture.toml`; this table
 explains their purpose. Adding a directory never implicitly grants dependencies.
+Checkpoint modules use the optional safetensors package to serialize FP32 state;
+the base wheel still has no mandatory dependencies. A family-specific strategy
+supplies the expected pretrained tensor inventory to the generic reader.
 The checker rejects cycles in those owner rules, unknown owners and source files
 at the package root (apart from its docstring-only initializer).
 
