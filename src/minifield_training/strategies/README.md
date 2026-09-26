@@ -1,4 +1,14 @@
-# Causal SFT composition
+# Training composition
+
+`pretrained.load_verified(directory, source, model)` verifies config, tokenizer
+and weight hashes, then loads the caller's exact tensor inventory as FP32
+masters. It requires a `models.contracts.PretrainedSource` and a
+`PretrainedModel[ConfigT]` adapter. Release pins, architecture parsing, tensor
+mapping and source dtype belong to the model family. The shared loader has no
+default family or release. It returns the parsed config and admitted backbone;
+task head initialization remains a separate composition step.
+
+## Causal SFT
 
 `sft.make_lfm2_5_step(cfg, inventory, optimizer, dtype=jnp.bfloat16)` binds the
 public LFM2.5 dense forward call and `objectives.loss.causal_loss_terms` to the

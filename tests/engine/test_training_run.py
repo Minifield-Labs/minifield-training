@@ -1,6 +1,6 @@
 """Single-device runner checkpoint, callback, and rejection lifecycle."""
 
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import nullcontext
 import dataclasses
 from itertools import count as indices
@@ -11,29 +11,34 @@ import jax.numpy as jnp
 import pytest
 
 from minifield_training.batching import classification as batching
+from minifield_training.batching import contracts
+from minifield_training.batching import dense
+from minifield_training.batching import sft
 from minifield_training.checkpoints import training_state
 from minifield_training.core import parameters
 from minifield_training.datasets.labeled import LabeledSequence
-from minifield_training.engine import classification_run
+from minifield_training.datasets.tokenization import TokenizedExample
 from minifield_training.engine import step
+from minifield_training.engine import training_run
 from minifield_training.optimizers import adamw
 from minifield_training.optimizers import state
 
 
-def _config(steps: int) -> classification_run.RunConfig:
-    """Return one-row fixed batches with a masked padding class."""
-    return classification_run.RunConfig(
-        microbatches=1,
-        rows_per_microbatch=1,
-        sequence_length=3,
-        pad_token_id=0,
-        vocab_size=8,
-        allowed_classes=(True, True, False),
-        padding_label=2,
+def _config(steps: int) -> training_run.RunConfig:
+    """Return bounded lifecycle settings independent of supervision."""
+    return training_run.RunConfig(
         seed=4,
         checkpoint_every=2,
         report_every=1,
         max_steps=steps,
+    )
+
+
+def _strategy() -> contracts.BatchStrategy[LabeledSequence]:
+    """Supply classification targets through the neutral batch interface."""
+    return dense.DenseBatchStrategy(
+        contracts.BatchShape(1, 1, 3, 0, 8),
+        batching.ClassTargets((True, True, False), 2),
     )
 
 
@@ -67,12 +72,12 @@ def _stream_source(
     *,
     end: int | None = None,
     failure: int | None = None,
-) -> Callable[[int, float | None], Generator[batching.PhysicalUpdate]]:
+) -> Callable[[int, float | None], Generator[contracts.PhysicalUpdate]]:
     """Generate fresh game records from a global logical update index."""
 
     def produce(
         start: int, deadline: float | None
-    ) -> Generator[batching.PhysicalUpdate]:
+    ) -> Generator[contracts.PhysicalUpdate]:
         """Resume at exactly the requested game and release on close."""
         assert deadline is None or deadline > 0
         starts.append(start)
@@ -92,17 +97,10 @@ def _stream_source(
                     for row in range(index % 2 + 1)
                 ]
                 batch = next(
-                    batching.iter_updates(
-                        records,
-                        microbatches=1,
-                        rows_per_microbatch=2,
-                        sequence_length=3,
-                        pad_token_id=0,
-                        vocab_size=8,
-                        allowed_classes=(True, True, False),
-                        padding_label=2,
-                        seed=4,
-                    )
+                    dense.DenseBatchStrategy(
+                        contracts.BatchShape(1, 2, 3, 0, 8),
+                        batching.ClassTargets((True, True, False), 2),
+                    ).iter_updates(records, seed=4)
                 )
                 seen.extend(batch.example_ids)
                 yield batch
@@ -133,12 +131,13 @@ def test_checkpoint_then_resume_at_next_batch(tmp_path: Path) -> None:
         evaluations.append(index)
         return {"lines": 0.0}
 
-    current, cursor = classification_run.run(
+    current, cursor = training_run.run(
         examples,
         initial,
         _update,
         inventory,
         _config(2),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path,
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
@@ -158,12 +157,13 @@ def test_checkpoint_then_resume_at_next_batch(tmp_path: Path) -> None:
         data_sha256="data",
         source_id="source",
     )
-    resumed, end = classification_run.run(
+    resumed, end = training_run.run(
         examples,
         restored,
         _update,
         inventory,
         _config(1),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path,
         optimizer_id="optimizer",
         cursor=restored_cursor,
@@ -204,8 +204,8 @@ def test_stream_source_uses_fresh_games_and_closes(
         return {"lines": float(index)}
 
     monkeypatch.setattr(jax.profiler, "StepTraceAnnotation", fake_annotation)
-    config = dataclasses.replace(_config(5), rows_per_microbatch=2)
-    current, cursor = classification_run.run(
+    config = _config(5)
+    current, cursor = training_run.run(
         None,
         initial,
         _update,
@@ -253,7 +253,7 @@ def test_final_checkpoint_precedes_stream_shutdown(tmp_path: Path) -> None:
 
     def source(
         start: int, deadline: float | None
-    ) -> Iterator[batching.PhysicalUpdate]:
+    ) -> Iterator[contracts.PhysicalUpdate]:
         """Record whether the final update survived before source teardown."""
         wrapped = _stream_source([], [], [])(start, deadline)
         try:
@@ -262,14 +262,12 @@ def test_final_checkpoint_precedes_stream_shutdown(tmp_path: Path) -> None:
             checkpoint_visible_at_close.append(checkpoint.is_file())
             wrapped.close()
 
-    current, cursor = classification_run.run(
+    current, cursor = training_run.run(
         None,
         initial,
         _update,
         inventory,
-        dataclasses.replace(
-            _config(1), rows_per_microbatch=2, checkpoint_every=100
-        ),
+        dataclasses.replace(_config(1), checkpoint_every=100),
         checkpoint_root=tmp_path,
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
@@ -291,11 +289,11 @@ def test_stream_deadline_stops_without_treating_source_as_broken(
         {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
     )
     clock = [0.0]
-    monkeypatch.setattr(classification_run, "_now", lambda: clock[0])
+    monkeypatch.setattr(training_run, "_now", lambda: clock[0])
 
     def source(
         start: int, deadline: float | None
-    ) -> Iterator[batching.PhysicalUpdate]:
+    ) -> Iterator[contracts.PhysicalUpdate]:
         """Consume one update, then hit the deadline before the next shard."""
         assert deadline == 1.0
         wrapped = _stream_source([], [], [])(start, deadline)
@@ -305,14 +303,13 @@ def test_stream_deadline_stops_without_treating_source_as_broken(
         finally:
             wrapped.close()
 
-    _, cursor = classification_run.run(
+    _, cursor = training_run.run(
         None,
         initial,
         _update,
         inventory,
         dataclasses.replace(
             _config(4),
-            rows_per_microbatch=2,
             checkpoint_every=100,
             max_seconds=1.0,
         ),
@@ -334,11 +331,11 @@ def test_stream_resume_matches_uninterrupted_state(tmp_path: Path) -> None:
     initial = adamw.initialize_state(
         {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
     )
-    config = dataclasses.replace(_config(6), rows_per_microbatch=2)
+    config = _config(6)
     full_seen: list[str] = []
     full_starts: list[int] = []
     full_closed: list[bool] = []
-    full_state, full_cursor = classification_run.run(
+    full_state, full_cursor = training_run.run(
         None,
         initial,
         _update,
@@ -354,7 +351,7 @@ def test_stream_resume_matches_uninterrupted_state(tmp_path: Path) -> None:
     split_starts: list[int] = []
     split_closed: list[bool] = []
     split_root = tmp_path / "split"
-    classification_run.run(
+    training_run.run(
         None,
         initial,
         _update,
@@ -374,7 +371,7 @@ def test_stream_resume_matches_uninterrupted_state(tmp_path: Path) -> None:
         data_sha256="data",
         source_id="source",
     )
-    resumed, end = classification_run.run(
+    resumed, end = training_run.run(
         None,
         restored,
         _update,
@@ -409,10 +406,10 @@ def test_stream_source_exhaustion_and_failure_are_errors(
     initial = adamw.initialize_state(
         {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
     )
-    config = dataclasses.replace(_config(3), rows_per_microbatch=2)
+    config = _config(3)
     closed: list[bool] = []
     with pytest.raises(RuntimeError, match="exhausted before run limit"):
-        classification_run.run(
+        training_run.run(
             None,
             initial,
             _update,
@@ -430,7 +427,7 @@ def test_stream_source_exhaustion_and_failure_are_errors(
 
     failed_closed: list[bool] = []
     with pytest.raises(ValueError, match="producer failed"):
-        classification_run.run(
+        training_run.run(
             None,
             initial,
             _update,
@@ -453,8 +450,10 @@ def test_stream_source_is_required_for_missing_examples(tmp_path: Path) -> None:
     initial = adamw.initialize_state(
         {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
     )
-    with pytest.raises(ValueError, match="requires labeled examples"):
-        classification_run.run(
+    with pytest.raises(
+        ValueError, match="requires examples and a batch strategy"
+    ):
+        training_run.run(
             None,
             initial,
             _update,
@@ -465,8 +464,11 @@ def test_stream_source_is_required_for_missing_examples(tmp_path: Path) -> None:
             cursor=training_state.Cursor("run", "data", "source", 0),
             required_platform="cpu",
         )
-    with pytest.raises(ValueError, match="Specify examples or a batch source"):
-        classification_run.run(
+    with pytest.raises(
+        ValueError,
+        match="Specify examples with a batch strategy or a batch source",
+    ):
+        training_run.run(
             [LabeledSequence("one", "game", (1,), 0)],
             initial,
             _update,
@@ -483,21 +485,136 @@ def test_stream_source_is_required_for_missing_examples(tmp_path: Path) -> None:
 def test_requested_tpu_fails_on_cpu() -> None:
     """A TPU request never silently falls back to CPU."""
     with pytest.raises(RuntimeError, match="Expected one tpu"):
-        classification_run.require_single_device("tpu")
+        training_run.require_single_device("tpu")
+
+
+def test_custom_strategy_owns_epoch_length_and_resume(tmp_path: Path) -> None:
+    """The runner mustn't infer real rows per update from physical capacity."""
+    seen: list[str] = []
+
+    class SingleRowStrategy:
+        """Use one real row in each four-row physical update."""
+
+        shape = contracts.BatchShape(2, 2, 3, 0, 8)
+
+        def update_count(self, examples: Sequence[LabeledSequence]) -> int:
+            """Report this strategy's epoch length."""
+            return len(examples)
+
+        def iter_updates(
+            self,
+            examples: Sequence[LabeledSequence],
+            *,
+            seed: int,
+            start_update: int = 0,
+            shuffle: bool = True,
+        ) -> Iterator[contracts.PhysicalUpdate]:
+            """Skip already committed records and yield one row per update."""
+            inner = dense.DenseBatchStrategy(
+                self.shape, batching.ClassTargets((True,), 0)
+            )
+            for example in examples[start_update:]:
+                seen.append(example.id)
+                yield from inner.iter_updates(
+                    [example], seed=seed, shuffle=shuffle
+                )
+
+    strategy: contracts.BatchStrategy[LabeledSequence] = SingleRowStrategy()
+    inventory = parameters.build_inventory(
+        {"weight": (1,)}, format_id="runner/1", decayed_names=frozenset()
+    )
+    initial = adamw.initialize_state(
+        {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
+    )
+    examples = [LabeledSequence(str(i), "game", (i + 1,), 0) for i in range(3)]
+    current, cursor = training_run.run(
+        examples,
+        initial,
+        _update,
+        inventory,
+        _config(4),
+        batch_strategy=strategy,
+        checkpoint_root=tmp_path,
+        optimizer_id="optimizer",
+        cursor=training_state.Cursor("run", "data", "source", 0),
+        required_platform="cpu",
+    )
+    assert seen == ["0", "1", "2", "0"]
+    training_run.run(
+        examples,
+        current,
+        _update,
+        inventory,
+        _config(2),
+        batch_strategy=strategy,
+        checkpoint_root=tmp_path,
+        optimizer_id="optimizer",
+        cursor=cursor,
+        required_platform="cpu",
+    )
+    assert seen == ["0", "1", "2", "0", "1", "2"]
+
+
+def test_same_runner_accepts_token_supervision(tmp_path: Path) -> None:
+    """SFT batches use the same lifecycle, optimizer and checkpoint writer."""
+    inventory = parameters.build_inventory(
+        {"weight": ()}, format_id="token-runner/1", decayed_names=frozenset()
+    )
+    initial = adamw.initialize_state({"weight": jnp.float32(1)}, inventory)
+    examples = [
+        TokenizedExample(
+            "a", "game", "train", (1, 2, 3), (0, 1, 1), "tok", "tpl"
+        )
+    ]
+    strategy: contracts.BatchStrategy[TokenizedExample] = (
+        dense.DenseBatchStrategy(
+            contracts.BatchShape(2, 2, 4, 0, 8), sft.TokenTargets()
+        )
+    )
+
+    def terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Use a known quadratic loss over explicitly scored token positions."""
+        count = jnp.sum(batch["loss_mask"], dtype=jnp.float32)
+        return params["weight"] ** 2 * count, count
+
+    messages: list[dict[str, float | str]] = []
+    current, cursor = training_run.run(
+        examples,
+        initial,
+        step.make_step(terms, inventory, adamw.AdamWConfig(0.1)),
+        inventory,
+        _config(1),
+        batch_strategy=strategy,
+        checkpoint_root=tmp_path,
+        optimizer_id="optimizer",
+        cursor=training_state.Cursor("run", "data", "source", 0),
+        report=messages.append,
+        required_platform="cpu",
+    )
+    assert messages[1]["loss"] == 1.0
+    assert cursor.next_batch == int(current["step"]) == 1
+    assert float(current["params"]["weight"]) == pytest.approx(0.9, abs=1e-5)
+    restored, restored_cursor = training_state.load(
+        tmp_path / "step-00000001",
+        inventory,
+        optimizer_id="optimizer",
+        run_id="run",
+        data_sha256="data",
+        source_id="source",
+    )
+    assert restored_cursor == cursor
+    assert jnp.array_equal(
+        restored["params"]["weight"], current["params"]["weight"]
+    )
 
 
 @pytest.mark.parametrize("seconds", [float("nan"), float("inf"), -float("inf")])
 def test_nonfinite_time_limit_is_rejected(seconds: float) -> None:
     """A malformed time bound cannot turn a run into an endless job."""
     with pytest.raises(ValueError, match="Invalid or unbounded"):
-        classification_run.RunConfig(
-            microbatches=1,
-            rows_per_microbatch=1,
-            sequence_length=3,
-            pad_token_id=0,
-            vocab_size=8,
-            allowed_classes=(True, True),
-            padding_label=1,
+        training_run.RunConfig(
             seed=0,
             checkpoint_every=1,
             report_every=1,
@@ -534,12 +651,13 @@ def test_rejected_step_publishes_no_checkpoint(tmp_path: Path) -> None:
         )
 
     with pytest.raises(RuntimeError, match="rejected"):
-        classification_run.run(
+        training_run.run(
             [LabeledSequence("one", "episode", (1, 2), 0)],
             initial,
             reject,
             inventory,
             _config(1),
+            batch_strategy=_strategy(),
             checkpoint_root=tmp_path,
             optimizer_id="optimizer",
             cursor=training_state.Cursor("run", "data", "source", 0),
@@ -550,12 +668,12 @@ def test_rejected_step_publishes_no_checkpoint(tmp_path: Path) -> None:
 
     closed: list[bool] = []
     with pytest.raises(RuntimeError, match="rejected"):
-        classification_run.run(
+        training_run.run(
             None,
             initial,
             reject,
             inventory,
-            dataclasses.replace(_config(1), rows_per_microbatch=2),
+            _config(1),
             checkpoint_root=tmp_path / "stream",
             optimizer_id="optimizer",
             cursor=training_state.Cursor("run", "data", "source", 0),
@@ -587,7 +705,7 @@ def test_streamed_runner_reuses_first_compilation(tmp_path: Path) -> None:
         return loss, count
 
     update = step.make_streaming_step(terms, inventory, adamw.AdamWConfig(0.01))
-    current, cursor = classification_run.run(
+    current, cursor = training_run.run(
         [
             LabeledSequence("a", "episode", (1, 2), 0),
             LabeledSequence("b", "episode", (2, 3), 1),
@@ -596,6 +714,7 @@ def test_streamed_runner_reuses_first_compilation(tmp_path: Path) -> None:
         update,
         inventory,
         _config(2),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path,
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
@@ -612,7 +731,7 @@ def test_warm_update_rate_excludes_first_compile_and_checkpoints(
 ) -> None:
     """Report update-call time with a controlled clock and clear denominator."""
     ticks = iter((0.0, 1.0, 11.0, 20.0, 21.0))
-    monkeypatch.setattr(classification_run, "_now", lambda: next(ticks))
+    monkeypatch.setattr(training_run, "_now", lambda: next(ticks))
     inventory = parameters.build_inventory(
         {"weight": (1,)}, format_id="runner/1", decayed_names=frozenset()
     )
@@ -620,7 +739,7 @@ def test_warm_update_rate_excludes_first_compile_and_checkpoints(
         {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
     )
     messages: list[dict[str, float | str]] = []
-    classification_run.run(
+    training_run.run(
         [
             LabeledSequence("a", "episode", (1,), 0),
             LabeledSequence("b", "episode", (2,), 1),
@@ -629,6 +748,7 @@ def test_warm_update_rate_excludes_first_compile_and_checkpoints(
         _update,
         inventory,
         _config(2),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path,
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
@@ -673,12 +793,13 @@ def test_step_annotations_leave_profile_capture_to_caller(
         LabeledSequence(str(index), "episode", (index + 1,), 0)
         for index in range(5)
     ]
-    classification_run.run(
+    training_run.run(
         examples,
         initial,
         _update,
         inventory,
         _config(1),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path / "default",
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
@@ -686,12 +807,13 @@ def test_step_annotations_leave_profile_capture_to_caller(
     )
     assert not steps
 
-    current, cursor = classification_run.run(
+    current, cursor = training_run.run(
         examples,
         initial,
         _update,
         inventory,
         _config(5),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path / "checkpoints",
         optimizer_id="optimizer",
         cursor=training_state.Cursor("run", "data", "source", 0),
@@ -701,12 +823,13 @@ def test_step_annotations_leave_profile_capture_to_caller(
     assert steps == [1, 2, 3, 4, 5]
     assert (tmp_path / "checkpoints" / "step-00000004").is_dir()
 
-    classification_run.run(
+    training_run.run(
         examples,
         current,
         _update,
         inventory,
         _config(2),
+        batch_strategy=_strategy(),
         checkpoint_root=tmp_path / "checkpoints",
         optimizer_id="optimizer",
         cursor=cursor,

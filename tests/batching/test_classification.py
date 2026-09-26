@@ -6,7 +6,9 @@ import numpy as np
 from numpy.typing import NDArray
 import pytest
 
-from minifield_training.batching import classification
+from minifield_training.batching import classification as batching
+from minifield_training.batching import contracts
+from minifield_training.batching import dense
 from minifield_training.datasets.labeled import LabeledSequence
 
 
@@ -18,17 +20,10 @@ def test_padded_decision_batches_preserve_records() -> None:
         LabeledSequence("c", "episode-2", (8,), 1),
     ]
     batches = list(
-        classification.iter_updates(
-            examples,
-            microbatches=2,
-            rows_per_microbatch=2,
-            sequence_length=4,
-            pad_token_id=0,
-            vocab_size=10,
-            allowed_classes=(True, True, False),
-            padding_label=2,
-            seed=4,
-        )
+        dense.DenseBatchStrategy(
+            contracts.BatchShape(2, 2, 4, 0, 10),
+            batching.ClassTargets((True, True, False), 2),
+        ).iter_updates(examples, seed=4)
     )
     assert len(batches) == 1
     batch = batches[0]
@@ -55,17 +50,10 @@ def test_active_flags_stay_on_host(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(jnp, "asarray", reject_active_conversion)
     batch = next(
-        classification.iter_updates(
-            [LabeledSequence("a", "ep", (1,), 0)],
-            microbatches=2,
-            rows_per_microbatch=1,
-            sequence_length=2,
-            pad_token_id=0,
-            vocab_size=3,
-            allowed_classes=(True,),
-            padding_label=0,
-            seed=0,
-        )
+        dense.DenseBatchStrategy(
+            contracts.BatchShape(2, 1, 2, 0, 3),
+            batching.ClassTargets((True,), 0),
+        ).iter_updates([LabeledSequence("a", "ep", (1,), 0)], seed=0)
     )
     assert isinstance(batch.active, np.ndarray)
     assert batch.active.dtype == np.dtype(np.bool_)
@@ -78,20 +66,13 @@ def test_rejects_masked_class_and_overlength() -> None:
     def admit(example: LabeledSequence) -> None:
         """Exercise the public batch boundary with fixed tiny settings."""
         list(
-            classification.iter_updates(
-                [example],
-                microbatches=1,
-                rows_per_microbatch=1,
-                sequence_length=2,
-                pad_token_id=0,
-                vocab_size=9,
-                allowed_classes=(True, True, False),
-                padding_label=2,
-                seed=0,
-            )
+            dense.DenseBatchStrategy(
+                contracts.BatchShape(1, 1, 2, 0, 9),
+                batching.ClassTargets((True, True, False), 2),
+            ).iter_updates([example], seed=0)
         )
 
     with pytest.raises(ValueError, match="Invalid labeled sequence"):
         admit(LabeledSequence("pad", "ep", (1,), 2))
-    with pytest.raises(ValueError, match="Invalid labeled sequence"):
+    with pytest.raises(ValueError, match="Invalid input sequence"):
         admit(LabeledSequence("long", "ep", (1, 2, 3), 1))

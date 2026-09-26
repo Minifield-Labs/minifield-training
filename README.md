@@ -45,7 +45,8 @@ game rules, serializer and gameplay callback stay outside the library wheel.
 
 - Explicit dependency directions, model-family isolation, host-safe inspection,
   and rejection of common import-path bypasses.
-- Substantial exact function duplication, Pylint textual similarity, and
+- Copied named record contracts, substantial exact function duplication,
+  Pylint textual similarity, and
   production function/module size limits. See [limits](docs/duplication.md).
 - Pyink, Ruff, Google Pylint, strict Mypy, pytest, local documentation links,
   source archive/wheel builds and an isolated wheel installation.

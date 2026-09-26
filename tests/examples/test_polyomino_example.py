@@ -16,9 +16,11 @@ from examples.polyomino import engine
 from examples.polyomino import serialize
 from examples.polyomino import source
 from examples.polyomino import train
+from minifield_training.batching import classification as batching
+from minifield_training.batching import contracts
+from minifield_training.batching import dense
 from minifield_training.checkpoints import training_state
 from minifield_training.core import parameters
-from minifield_training.engine.classification_run import RunConfig
 from minifield_training.models.lfm2_5 import model
 from minifield_training.optimizers import adamw
 
@@ -77,14 +79,37 @@ def test_one_hot_and_nonrepeating_resume_batches() -> None:
         source.sequence_from_row(rows[0], _tokenizer())
     rows[0]["expert_action"] = [0, 1, 0, 0, 0, 0, 0, 0]
     data = Dataset.from_list(rows)
-    config = RunConfig(
-        1, 2, 512, 0, 100, (True,) * 7 + (False,), 7, 17, 10, 1, max_steps=2
+    strategy = dense.DenseBatchStrategy(
+        contracts.BatchShape(1, 2, 512, 0, 100),
+        batching.ClassTargets((True,) * 7 + (False,), 7),
     )
-    batches = list(source.HFDatasetBatchSource(data, _tokenizer(), config)(0))
-    resumed = list(source.HFDatasetBatchSource(data, _tokenizer(), config)(1))
+    batches = list(
+        source.HFDatasetBatchSource(data, _tokenizer(), strategy, seed=17)(0)
+    )
+    resumed = list(
+        source.HFDatasetBatchSource(data, _tokenizer(), strategy, seed=17)(1)
+    )
     assert len(batches) == 2
     assert resumed[0].example_ids == batches[1].example_ids
     assert len(set(batches[0].example_ids + batches[1].example_ids)) == 4
+
+
+def test_source_rejects_incompatible_batch_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A strategy that splits chunks cannot silently corrupt HF resume."""
+    strategy = dense.DenseBatchStrategy(
+        contracts.BatchShape(1, 2, 512, 0, 100),
+        batching.ClassTargets((True,) * 7 + (False,), 7),
+    )
+    monkeypatch.setattr(
+        dense.DenseBatchStrategy, "update_count", lambda *_args: 2
+    )
+    batches = source.HFDatasetBatchSource(
+        Dataset.from_list(_rows()), _tokenizer(), strategy
+    )(0)
+    with pytest.raises(ValueError, match="exactly one update"):
+        next(batches)
 
 
 def test_block_policy_binds_checkpoint_source() -> None:

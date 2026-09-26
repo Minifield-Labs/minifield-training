@@ -65,6 +65,41 @@ def test_distinct_constants_and_tiny_boilerplate_are_allowed(
     assert check_duplicates.inspect(tmp_path) == []
 
 
+@pytest.mark.parametrize("active_type", ["jax.Array", "NDArray[np.bool_]"])
+def test_small_record_copies_fail_even_with_annotation_drift(
+    tmp_path: pathlib.Path, active_type: str
+) -> None:
+    """The original PhysicalUpdate copy fails independently of function size."""
+    source = _repository(tmp_path)
+    record = """
+        @dataclass(frozen=True)
+        class PhysicalUpdate:
+            microbatches: DeviceBatch
+            active: jax.Array
+            example_ids: tuple[str, ...]
+    """
+    _write(source, "sft.py", record)
+    _write(
+        source, "classification.py", record.replace("jax.Array", active_type)
+    )
+    errors = check_duplicates.inspect(tmp_path)
+    assert len(errors) == 1
+    assert "duplicate record contract" in errors[0]
+    assert "PhysicalUpdate" in errors[0]
+    assert "sft.py" in errors[0] and "classification.py" in errors[0]
+
+
+def test_different_record_names_or_fields_remain_distinct(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Shared field spellings alone don't establish a shared contract."""
+    source = _repository(tmp_path)
+    _write(source, "first.py", "class Config:\n    width: int\n")
+    _write(source, "second.py", "class Config:\n    depth: int\n")
+    _write(source, "third.py", "class Shape:\n    width: int\n")
+    assert check_duplicates.inspect(tmp_path) == []
+
+
 @pytest.mark.parametrize(
     "changed",
     [

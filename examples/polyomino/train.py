@@ -17,11 +17,15 @@ from tokenizers import Tokenizer  # type: ignore[import-untyped]
 from examples.polyomino import source
 from examples.polyomino.evaluate import ALLOWED
 from examples.polyomino.evaluate import make_evaluator
+from minifield_training.batching import classification as class_batching
+from minifield_training.batching import contracts as batch_contracts
+from minifield_training.batching import dense
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
 from minifield_training.core import parameters as core_parameters
-from minifield_training.engine import classification_run
+from minifield_training.engine import training_run
 from minifield_training.models.lfm2_5 import model
+from minifield_training.models.lfm2_5 import pretrained as model_source
 from minifield_training.optimizers import adamw
 from minifield_training.optimizers import state as optimizer_state
 from minifield_training.strategies import classification
@@ -33,9 +37,9 @@ def load_model_metadata(model_dir: Path) -> tuple[model.Config, Tokenizer]:
     config_path = model_dir / "config.json"
     tokenizer_path = model_dir / "tokenizer.json"
     if (
-        json_io.digest_file(config_path) != pretrained.BASE.config_sha256
+        json_io.digest_file(config_path) != model_source.BASE.config_sha256
         or json_io.digest_file(tokenizer_path)
-        != pretrained.BASE.tokenizer_sha256
+        != model_source.BASE.tokenizer_sha256
     ):
         raise ValueError("Model config/tokenizer differs from pinned Base")
     raw: object = json.loads(config_path.read_text(encoding="utf-8"))
@@ -50,7 +54,7 @@ def source_identity(
 ) -> str:
     """Bind the pretrained release, head seed, and replayable batch order."""
     settings = {
-        "model": dataclasses.asdict(pretrained.BASE),
+        "model": dataclasses.asdict(model_source.BASE),
         "config": dataclasses.asdict(cfg),
         "head_seed": args.head_seed,
         "data_seed": args.data_seed,
@@ -192,7 +196,7 @@ def main() -> None:
         or args.max_hours is not None
     ):
         raise ValueError("Profiling needs a separate 4-50 update run")
-    classification_run.require_single_device(args.platform)
+    training_run.require_single_device(args.platform)
     cfg, tokenizer = load_model_metadata(args.model_dir)
     data_sha256 = source.data_identity()
     data = source.load_decisions(args.dataset_cache)
@@ -210,7 +214,9 @@ def main() -> None:
         else args.resume
     )
     if resume_path is None:
-        loaded_cfg, backbone = pretrained.load_verified(args.model_dir)
+        loaded_cfg, backbone = pretrained.load_verified(
+            args.model_dir, model_source.BASE, model_source.Adapter()
+        )
         if loaded_cfg != cfg:
             raise ValueError("Verified Base config changed during warm start")
         params = classification.initialize_from_backbone(
@@ -247,14 +253,17 @@ def main() -> None:
         rematerialize_blocks=not args.no_remat,
         fuse_accumulation=args.fuse_accumulation,
     )
-    config = classification_run.RunConfig(
-        microbatches=args.microbatches,
-        rows_per_microbatch=args.rows,
-        sequence_length=args.sequence_length,
-        pad_token_id=0,
-        vocab_size=cfg.vocab_size,
-        allowed_classes=ALLOWED,
-        padding_label=7,
+    batch_strategy = dense.DenseBatchStrategy(
+        batch_contracts.BatchShape(
+            args.microbatches,
+            args.rows,
+            args.sequence_length,
+            0,
+            cfg.vocab_size,
+        ),
+        class_batching.ClassTargets(ALLOWED, 7),
+    )
+    config = training_run.RunConfig(
         seed=args.data_seed,
         checkpoint_every=args.checkpoint_every,
         report_every=args.report_every,
@@ -324,7 +333,7 @@ def main() -> None:
     )
     run_started = time.monotonic()
     try:
-        _, final_cursor = classification_run.run(
+        _, final_cursor = training_run.run(
             None,
             full_state,
             update,
@@ -337,7 +346,9 @@ def main() -> None:
             report=report,
             required_platform=args.platform,
             annotate_steps=args.profile_dir is not None,
-            batch_source=source.HFDatasetBatchSource(data, tokenizer, config),
+            batch_source=source.HFDatasetBatchSource(
+                data, tokenizer, batch_strategy, seed=args.data_seed
+            ),
         )
     finally:
         if tracing:

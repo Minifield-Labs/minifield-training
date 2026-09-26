@@ -1,6 +1,6 @@
-"""Bounded single-device lifecycle for hard-label sequence updates."""
+"""Bounded single-device lifecycle over caller-supplied batch strategies."""
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 import dataclasses
 import math
@@ -9,10 +9,9 @@ import time
 
 import jax
 
-from minifield_training.batching import classification as batching
+from minifield_training.batching import contracts as batching
 from minifield_training.checkpoints import training_state
 from minifield_training.core import parameters as core_parameters
-from minifield_training.datasets.labeled import LabeledSequence
 from minifield_training.engine import step
 from minifield_training.optimizers import adamw
 from minifield_training.optimizers import state
@@ -25,15 +24,8 @@ _now: Callable[[], float] = time.monotonic
 
 @dataclasses.dataclass(frozen=True)
 class RunConfig:
-    """Fixed physical shapes, replay seed, and bounded stop/cadence."""
+    """Replay seed, checkpoint/report cadence, and bounded run duration."""
 
-    microbatches: int
-    rows_per_microbatch: int
-    sequence_length: int
-    pad_token_id: int
-    vocab_size: int
-    allowed_classes: tuple[bool, ...]
-    padding_label: int
     seed: int
     checkpoint_every: int
     report_every: int
@@ -41,17 +33,9 @@ class RunConfig:
     max_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        """Reject unbounded runs and invalid fixed update shapes."""
+        """Reject unbounded runs and invalid cadence or seed."""
         if (
-            min(
-                self.microbatches,
-                self.rows_per_microbatch,
-                self.sequence_length,
-                self.vocab_size,
-                self.checkpoint_every,
-                self.report_every,
-            )
-            < 1
+            min(self.checkpoint_every, self.report_every) < 1
             or self.seed < 0
             or self.max_steps is None
             and self.max_seconds is None
@@ -60,7 +44,7 @@ class RunConfig:
             or self.max_seconds is not None
             and (not math.isfinite(self.max_seconds) or self.max_seconds <= 0)
         ):
-            raise ValueError("Invalid or unbounded classification run")
+            raise ValueError("Invalid or unbounded training run")
 
 
 def require_single_device(platform: str | None = None) -> jax.Device:
@@ -112,8 +96,28 @@ def _close_if_supported(iterator: object) -> None:
         close()
 
 
-def run(
-    examples: Sequence[LabeledSequence] | None,
+def _epoch_update_count[RecordT](
+    examples: Sequence[RecordT] | None,
+    strategy: batching.BatchStrategy[RecordT] | None,
+    source: batching.BatchSource | None,
+) -> int:
+    """Admit exactly one input mode and resolve its finite epoch length."""
+    if source is not None:
+        if examples is not None or strategy is not None:
+            raise ValueError(
+                "Specify examples with a batch strategy or a batch source"
+            )
+        return 0
+    if not examples or strategy is None:
+        raise ValueError("Run requires examples and a batch strategy")
+    updates = strategy.update_count(examples)
+    if updates < 1:
+        raise ValueError("Batch strategy must produce at least one update")
+    return updates
+
+
+def run[RecordT](
+    examples: Sequence[RecordT] | None,
     initial_state: state.State,
     update: step.LogicalStep | step.StreamingStep,
     inventory: core_parameters.FullParameterInventory,
@@ -126,31 +130,24 @@ def run(
     report: Reporter | None = None,
     required_platform: str | None = None,
     annotate_steps: bool = False,
-    batch_source: (
-        Callable[[int, float | None], Iterator[batching.PhysicalUpdate]] | None
-    ) = None,
+    batch_strategy: batching.BatchStrategy[RecordT] | None = None,
+    batch_source: batching.BatchSource | None = None,
 ) -> tuple[state.State, training_state.Cursor]:
     """Compile and run bounded updates, saving after committed boundaries.
 
     The finite dataset stays on the host and resumes seeded epoch order. A
     batch source instead starts at the global next-batch cursor and must yield
     deterministic, non-repeating updates until the run bound is reached. Only
-    one fixed physical batch is transferred per step. The caller provides
+    one logical update's arrays are transferred at a time. The caller provides
     persistent checkpoints and optional gameplay evaluation.
     """
     device = require_single_device(required_platform)
-    if batch_source is None:
-        if not examples:
-            raise ValueError("Classification run requires labeled examples")
-    elif examples is not None:
-        raise ValueError("Specify examples or a batch source")
+    updates_per_epoch = _epoch_update_count(
+        examples, batch_strategy, batch_source
+    )
     adamw.validate_full_weight_state(initial_state, inventory)
     if int(initial_state["step"]) != cursor.next_batch:
         raise ValueError("Optimizer step and data cursor disagree")
-    updates_per_epoch = 0
-    if examples is not None:
-        capacity = config.microbatches * config.rows_per_microbatch
-        updates_per_epoch = math.ceil(len(examples) / capacity)
     compiled = (
         update if isinstance(update, step.StreamingStep) else jax.jit(update)
     )
@@ -180,19 +177,10 @@ def run(
             ):
                 break
             if batch_source is None:
-                assert examples is not None
+                assert examples is not None and batch_strategy is not None
                 epoch, offset = divmod(cursor.next_batch, updates_per_epoch)
-                batches = batching.iter_updates(
-                    examples,
-                    microbatches=config.microbatches,
-                    rows_per_microbatch=config.rows_per_microbatch,
-                    sequence_length=config.sequence_length,
-                    pad_token_id=config.pad_token_id,
-                    vocab_size=config.vocab_size,
-                    allowed_classes=config.allowed_classes,
-                    padding_label=config.padding_label,
-                    seed=config.seed + epoch,
-                    start_update=offset,
+                batches = batch_strategy.iter_updates(
+                    examples, seed=config.seed + epoch, start_update=offset
                 )
             else:
                 assert source_batches is not None
@@ -217,9 +205,7 @@ def run(
                 update_seconds = _now() - update_started
                 if not bool(result.committed):
                     code = int(result.code)
-                    raise RuntimeError(
-                        f"Classification update rejected, code={code}"
-                    )
+                    raise RuntimeError(f"Training update rejected, code={code}")
                 current = result.state
                 cursor = dataclasses.replace(
                     cursor, next_batch=cursor.next_batch + 1
@@ -275,7 +261,7 @@ def run(
                     deadline is None or _now() < deadline
                 ):
                     raise RuntimeError(
-                        "Classification batch source exhausted before run limit"
+                        "Training batch source exhausted before run limit"
                     )
             if (
                 config.max_steps is not None and committed >= config.max_steps

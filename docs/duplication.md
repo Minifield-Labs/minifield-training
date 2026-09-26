@@ -19,7 +19,15 @@ names, annotations, defaults, decorators and synchronous/asynchronous behavior
 remain significant. Local variables aren't renamed: Python reflection, keyword
 arguments, closures and shadowing make careless name normalization unsound.
 
-`duplication.toml` contains the entire versioned policy:
+Named record contracts are checked independently of function size. Classes
+with the same name and the same nonempty set of directly annotated fields fail
+even when their annotations, defaults, field order or methods differ. This
+catches copied contracts such as `PhysicalUpdate` before their types drift.
+It covers dataclasses, named tuples and typed dictionaries written as classes,
+without depending on decorator spelling. Distinct class names or field sets
+still require review for semantic overlap.
+
+`duplication.toml` contains the versioned size limits:
 
 | Setting | Current limit | Meaning |
 | --- | --- | --- |
@@ -41,7 +49,7 @@ the repository and cannot be symlinked.
 
 ## What still needs a reviewer
 
-This is conservative exact structural matching. Renamed locals, changed
+Function detection uses conservative exact structural matching. Renamed locals, changed
 signatures, partial function copies, equivalent algorithms and giant expressions
 can escape it. Pylint's textual similarity check provides another signal. Neither
 check establishes a useful abstraction or replaces review of the dependency

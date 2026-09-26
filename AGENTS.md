@@ -23,9 +23,14 @@ destination module's README too.
 - `objectives` owns supervision and reduction mathematics. `datasets` owns
   records, admission, splits, tokenization, and verified caches. `batching` owns
   packing and iteration. Separate public context from private supervision.
+- Batching strategies implement `batching.contracts.BatchStrategy` and return
+  its single `PhysicalUpdate` type. Dense target encoders share the common
+  iterator. Engines consume protocols, with concrete selection at composition.
 - `optimizers` owns update transactions. `engine` owns shared lifecycle.
   `strategies` composes public interfaces; it mustn't grow copied model blocks,
   checkpoint writers, or runner loops.
+- Pretrained release pins and family-specific admission belong under that
+  model family. Shared loaders require an explicit source and model adapter.
 - `artifacts` owns CPU inspection and file integrity. `checkpoints` owns training
   state persistence. `execution` owns wire normalization and worker entrypoints.
   `supervisor` owns process isolation, transport, local GPU slots, and delivery.

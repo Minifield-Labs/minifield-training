@@ -33,12 +33,12 @@ single-device run, but compiles one physical gradient, device-side addition,
 normalization, and donated commit as separate programs. The host selects active
 microbatches and never reads gradient values. This bounds the compiled reverse
 pass to one physical batch instead of embedding it inside a full-model scan.
-The classifier runner calls this form directly; other logical steps retain the
-scanned JIT path.
+The training runner calls this form directly when supplied a streaming step;
+other logical steps retain the scanned JIT path.
 The donated optimizer consumes its input buffers, including on a rejected
 commit. Continue from the returned `CommitResult.state` in either case.
 
-The classifier runner reports the first update's wall time separately because
+The training runner reports the first update's wall time separately because
 it can include compilation. `warm_updates_per_second` divides later committed
 updates by their summed update-call time; it excludes batch construction,
 checkpoints, gameplay and the first update. `last_update_seconds` is the most
@@ -55,10 +55,10 @@ coverage, but its v5e memory peak and speed remain unmeasured.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
-`classification_run.run` is the bounded single-device host lifecycle for
-hard-label sequence updates. It JIT-compiles a scanned logical update or calls
+`training_run.run` is the bounded single-device host lifecycle for
+caller-supplied supervision. It JIT-compiles a scanned logical update or calls
 the already compiled stages of a streaming update,
-passes fixed `[M, B, T]` batches from host records, checkpoints the complete
+consumes physical updates through batching protocols, checkpoints the complete
 state after committed updates, and resumes deterministic epoch shuffles from
 the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each
 invocation. An optional callback runs at checkpoint boundaries for product
@@ -68,15 +68,22 @@ supplies an explicit persistent checkpoint path. CPU tests cover save/restore,
 cursor advance, callback boundaries, and TPU absence. TPU compilation,
 throughput, and full-model gameplay remain unverified here.
 
-For a continuously generated dataset, pass `examples=None` and a
-`batch_source(next_batch, deadline)` callback. The deadline is an absolute
-`time.monotonic()` value or `None`. The callback returns an iterator of
-`batching.classification.PhysicalUpdate` values starting at that global logical
-update index. It must produce the same unread updates after restore, keep game
-and decision identities unique, and provide enough batches to reach the run's
+For finite records, supply `examples` and a `batch_strategy` implementing
+`batching.contracts.BatchStrategy[RecordT]`. The runner owns epoch seeds and the
+global update cursor; the strategy owns physical shape and supervision.
+`RunConfig` contains only replay seed, cadence and run bounds. SFT and
+classification use the same runner without a task-specific import.
+
+For a replayable stream, pass `examples=None` and a `batch_source` implementing
+`batching.contracts.BatchSource`. Its `__call__(next_batch, deadline)` receives
+the global update index and an absolute `time.monotonic()` deadline or `None`.
+The callback returns an iterator of
+`batching.contracts.PhysicalUpdate` values starting at that global logical
+update index. It must produce the same unread updates after restore, keep
+record identities unique, and provide enough batches to reach the run's
 step or time bound. It must stop waiting for input at the deadline. The
 runner saves committed work before closing the iterator on a normal stop, and
 raises if the source ends early. Finite `examples` keep their seeded epoch
 behavior; passing both input modes is an error. The checkpoint cursor
 identifies the next unread update. Its data/source IDs must identify the
-generator and deterministic settings as well as any pre-generated inputs.
+source and deterministic settings as well as any stored inputs.
