@@ -89,3 +89,14 @@ qualification evidence belong to the components that introduce them.
 
 See [contributing](CONTRIBUTING.md) for commands and
 [documentation ownership](docs/README.md) for where contracts and evidence live.
+
+## MagicBox training
+
+[The self-contained TPU notebook](examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb)
+trains the LFM2.5 Encoder 350M MagicBox architecture on the completed
+`minifield.magicbox/1.0` dataset. It includes an offline tiny-model check,
+a 2-update full-model TPU check, all-parameter training, exact resume,
+held-out evaluation, inference export, and reload/prediction.
+
+See [the architecture and run guide](docs/magicbox.md) and
+[the example README](examples/magicbox/README.md).

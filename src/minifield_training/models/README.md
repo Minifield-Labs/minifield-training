@@ -36,3 +36,31 @@ still unverified here.
 and convolution projection matrices in this model's expected inventory.
 Quantization strategies use it to select candidates before JIT; embeddings,
 output heads, norms, and depthwise taps aren't candidates.
+
+## MagicBox and bidirectional LFM
+
+`lfm2_5.encoder` owns the pinned `LiquidAI/LFM2.5-Encoder-350M` release
+`b886781f7c6f10ca9b7096e21b83e30a073c2f39`. Its adapter admits the 148 FP32
+`lfm2.*` tensors, totaling 354,483,968 parameters. It composes centered
+short convolutions, bidirectional pad-masked GQA, QK RMSNorm, RoPE, and the
+family's SwiGLU blocks. Every block rematerializes in reverse mode. It doesn't
+construct or load an unused vocabulary head.
+
+`magicbox.model` accepts an injected shared encoder callable. Source tokens
+are encoded once per request; independent schema rows read the resulting
+source memory through 2 pre-norm fusion blocks. Defaults are width 256,
+4 heads, FFN multiplier 2, dropout 0.1, and extraction match width 128.
+One scalar candidate head serves both choice and score. Separate binary and
+presence heads and token-membership logits complete the four output types.
+Schema rows run in chunks without detaching either encoder path.
+
+`magicbox.cache.SchemaCache` caches pre-projection schema token outputs for
+inference. Call `get` before JIT tracing, supplying tokenizer, template, and
+precision revisions in `context`. It binds schema IDs/masks and immutable
+encoder leaf identities, rejects replaced weights, and isn't serializable.
+Pass the validated result as `schema_hidden` to the model. Training rejects
+that argument. Fusion-only updates don't invalidate pre-projection caches.
+
+CPU checks cover published tensor shapes, noncausal behavior, FP32/BF16
+padding, shared gradients, permutation, 2/3/17/65 candidates, row chunking,
+and cache rejection. See [the training guide](../../../docs/magicbox.md).

@@ -1,0 +1,133 @@
+"""CPU schema admission and private-label separation contracts."""
+
+import dataclasses
+import json
+import math
+from pathlib import Path
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from examples.magicbox import smoke
+from minifield_training.batching import magicbox as batching
+from minifield_training.core import json_io
+from minifield_training.datasets import magicbox
+from minifield_training.objectives import magicbox as objective
+
+
+def test_consumer_contract_snapshot() -> None:
+    """Pin the producer document and the consumer's versioned constants."""
+    root = Path(__file__).resolve().parents[2] / "docs/contracts"
+    identity = json.loads((root / "magicbox-data-format-v1.json").read_text())
+    assert (
+        identity["sha256"]
+        == "a3c93f2385ee3a99ca40696c6d2384ccb2e49fa35017c846ee1250632b2d86ab"
+    )
+    assert (
+        json_io.digest_file(root / "magicbox-data-format-v1.md")
+        == identity["sha256"]
+    )
+    assert (
+        identity["format"],
+        identity["template"],
+        identity["offset_policy"],
+    ) == (magicbox.FORMAT, magicbox.TEMPLATE, magicbox.OFFSET_POLICY)
+
+
+def test_templates_keep_choice_order_and_score_ranks() -> None:
+    """Choice IDs enter their own rows; scores preserve ordinal position."""
+    keys, rows = magicbox.schema_rows(
+        {
+            "type": "choice",
+            "instructions": "Pick.",
+            "criteria": {"b": "Second", "a": "First"},
+        }
+    )
+    assert keys == ("b", "a")
+    assert rows == (
+        "Type: choice\nQuestion: Pick.\nCandidate: b\nDescription: Second",
+        "Type: choice\nQuestion: Pick.\nCandidate: a\nDescription: First",
+    )
+    _, ranks = magicbox.schema_rows(
+        {"type": "score", "instructions": "Rate.", "criteria": ["Low", "High"]}
+    )
+    assert "Level: 1 of 2 levels, indexed from 0\nDescription: High" in ranks[1]
+
+
+def test_unicode_overlaps_and_unalignable_boundaries() -> None:
+    """Keep all byte tokens overlapping one Unicode character."""
+    encoded = magicbox.Encoding(
+        (1, 2, 3, 4, 5),
+        ((0, 0), (0, 1), (0, 1), (1, 2), (2, 5)),
+        (True, False, False, False, False),
+    )
+    assert magicbox.aligned_span(encoded, [0, 1], "é Ada") == (1, 3)
+    assert magicbox.aligned_span(encoded, [0, 5], "é Ada") == (1, 5)
+    with pytest.raises(ValueError, match="splits a token"):
+        magicbox.aligned_span(encoded, [3, 5], "é Ada")
+
+
+def test_type_balancing_partial_labels_and_no_supervision() -> None:
+    """Unequal fields and microbatches still produce one equal mean per type."""
+    record = smoke.fixture()
+    second = dataclasses.replace(
+        record, id="second", fields=(record.fields[1],)
+    )
+    packed = batching.build(
+        [record, second], batching.Shape(2, 1, 16, 64, 8), seed=5, update=3
+    )
+    weights = np.asarray(packed.microbatches["field_weight"])
+    np.testing.assert_allclose(weights.sum(), 1)
+    assert weights[0, 0, 0] == 0.25
+    assert weights[0, 0, 1] == weights[1, 0, 0] == 0.125
+    totals = []
+    for index in range(2):
+        batch = {
+            key: jnp.asarray(value[index])
+            for key, value in packed.microbatches.items()
+        }
+        outputs = {
+            key: jnp.zeros((1, 8))
+            for key in ("candidate", "binary", "presence")
+        }
+        outputs["tokens"] = jnp.zeros((1, 8, 16))
+        loss, mass = objective.terms(outputs, batch)
+        totals.append((float(loss), float(mass)))
+    assert math.isclose(
+        sum(value[0] for value in totals),
+        (4 * math.log(2) + math.log(3)) / 4,
+        rel_tol=1e-6,
+    )
+    missing = dataclasses.replace(
+        record,
+        fields=tuple(
+            dataclasses.replace(field, supervised=False)
+            for field in record.fields
+        ),
+    )
+    with pytest.raises(ValueError, match="no_supervision"):
+        batching.build(
+            [missing], batching.Shape(1, 1, 16, 64, 8), seed=0, update=0
+        )
+
+
+def test_absent_and_presence_only_extractions() -> None:
+    """Absence labels all selectable tokens zero; presence-only skips tokens."""
+    request = {
+        "state": "Ada",
+        "questions": {"x": {"type": "extract", "instructions": "Find a name."}},
+    }
+    absent = magicbox.compile_record(
+        "absent", request, {"x": {"has_answer": False}}, smoke.toy_encode
+    )
+    presence = magicbox.compile_record(
+        "presence", request, {"x": {"has_answer": True}}, smoke.toy_encode
+    )
+    assert absent.fields[0].token_supervised
+    assert not presence.fields[0].token_supervised
+    assert absent.fields[0].rows == presence.fields[0].rows
+    with pytest.raises(ValueError, match="nonempty"):
+        magicbox.schema_rows(
+            {"type": "choice", "instructions": "", "criteria": {"x": "X"}}
+        )

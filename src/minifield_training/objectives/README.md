@@ -17,3 +17,11 @@ admission rejects them earlier.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 Document each added public contract, consumer, example, and test here.
+
+`magicbox.losses` implements grouped categorical cross entropy, Bernoulli
+binary/presence losses, and mean selectable-token BCE per extraction field.
+Absent extraction labels supervise all selectable tokens as zero;
+presence-only labels omit token loss. `terms` returns preweighted loss sum
+and weight mass to the existing step engine. All reductions use FP32, and
+missing labels and padding have zero weight. Group sizes don't increase a
+field's loss weight. Tests use analytical zero-logit expectations.

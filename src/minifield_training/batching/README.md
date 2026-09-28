@@ -52,3 +52,18 @@ optional absolute deadline. The shared runner consumes either interface.
 
 Sequence packing isn't implemented. Concatenating records needs segment-aware
 attention and an objective that preserves supervision boundaries.
+
+`magicbox.build` emits the same `PhysicalUpdate` contract for the different
+MagicBox layout: `[microbatches, requests, schema_rows, schema_tokens]` and
+one source sequence per request. It records field ownership and candidate
+order explicitly; the request axis supplies source ownership after sharding.
+`Shape` limits are operational and never change head parameters. Overflow
+raises; nothing is truncated. Replay seeds bind update, record, field, and
+candidate identities.
+
+Field weights are calculated before device or microbatch slicing. The first
+row of each labeled field carries its weight; further candidate rows carry
+zero. Each task type contributes its mean field loss, followed by a weighted
+mean across active types. `type_weights` defaults to `(1, 1, 1, 1)`.
+Unsupervised training batches raise `no_supervision` before an optimizer
+transaction. `allow_unsupervised=True` is reserved for inference compilation.

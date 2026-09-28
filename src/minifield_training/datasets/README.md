@@ -76,3 +76,11 @@ The bounded synthetic acceptance path is executable with
 It reads JSONL, prepares and tokenizes with an offline local vocabulary,
 replays a verified artifact, builds a padded update, and decreases selected
 next-token loss on the public tiny LFM2.5 model. This is CPU evidence only.
+
+`magicbox` is the CPU-only consumer of `minifield.magicbox/1.0`. It owns
+`Encoding`, `Field`, and `Record`, pinned `magicbox-rows/1` templates,
+partial-label admission, probability checks, and exact character-to-token
+span matching. Source and schema IDs remain separate from private targets.
+Unicode byte-token overlaps are retained; no span is snapped or normalized.
+The optional native tokenizer adapter and Parquet I/O live in the MagicBox
+example, keeping this package's dataset imports free of numerical libraries.

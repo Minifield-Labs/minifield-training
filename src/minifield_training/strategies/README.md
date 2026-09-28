@@ -85,3 +85,15 @@ Classification training, prediction, and SFT training pass the same effective
 weights into model forward. FP32 masters and Adam moments stay unquantized.
 This first recipe applies full fake quantization from update 1. A ramp schedule
 and TPU qualification need separate evidence.
+
+`magicbox` injects the bidirectional LFM encoder into the independent
+MagicBox family and builds a streaming step with all parameters trainable.
+The existing `data` mesh shards requests, preserving every field's candidate
+group on its request's device. It reuses the existing full-weight AdamW,
+accumulation, checkpoint, and run lifecycle.
+
+`magicbox_bundle.save/load` persists and verifies the complete inference
+bundle: exact encoder config, fusion config, one shared parameter tree,
+tokenizer and offset contract, per-file checksums, and decode threshold.
+Its version is `minifield.magicbox.model/1`. Runtime Rust consumption remains
+a separate integration. Tiny save/load tests reproduce logits exactly.
