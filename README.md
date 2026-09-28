@@ -98,5 +98,10 @@ trains the LFM2.5 Encoder 350M MagicBox architecture on the completed
 a 2-update full-model TPU check, all-parameter training, exact resume,
 held-out evaluation, inference export, and reload/prediction.
 
+It detects single-host TPU device counts and defaults to a 10-update smoke
+run. Set `RUN_MODE = 'full'` for the 3-epoch recipe, with a 32-request logical
+batch on 8 devices. Both modes download the pinned `protodotdesign/magicbox-v1`
+dataset and save to separate run directories.
+
 See [the architecture and run guide](docs/magicbox.md) and
 [the example README](examples/magicbox/README.md).

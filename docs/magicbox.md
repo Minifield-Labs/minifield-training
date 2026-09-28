@@ -1,9 +1,10 @@
 # MagicBox architecture and training
 
 The notebook is `examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb`. It embeds
-the complete training source and lockfile. Attach the completed dataset from
-the CPU data notebook, select an eight-device TPU runtime, enable internet,
-and run the cells. The source archive is checked before extraction.
+the complete training source and lockfile. Select a single-host TPU runtime,
+enable internet, and run the cells. It detects the visible TPU devices and
+downloads the pinned dataset from Hugging Face. The source archive is checked
+before extraction.
 
 ## Architecture
 
@@ -63,8 +64,24 @@ no labels.
 
 ## Run defaults and recovery
 
+The notebook starts in `RUN_MODE = 'smoke'`. It runs up to 10 total updates of
+the full model, using 1 request per device, 1 microbatch, schema chunks of 1,
+and 8 validation records. Its first 2 updates save a checkpoint, which the
+next invocation reloads before continuing to the 10-update target. Rerunning
+an already completed smoke run adds no training updates. The inference cell
+reloads the exported bundle in a fresh process.
+
+`DEVICES = None` detects the runtime's visible TPU devices. An explicit count
+requires exactly that many devices on the same host. This supports a Colab
+v5e-1 smoke run and an 8-device full run without changing model architecture.
+Requests per microbatch are `DEVICES * REQUESTS_PER_DEVICE`, with a default
+of 1 request per device. Both modes retain source and schema token limits.
+
+Set `RUN_MODE = 'full'` for these full-training defaults:
+
 - 3 epochs, all parameters trainable, including embeddings.
-- 8 TPU devices, 8 global requests per microbatch, 4 accumulated microbatches.
+- All visible TPU devices, 1 request per device, 4 accumulated microbatches.
+  On 8 devices this is 32 requests per logical update.
 - BF16 activations, FP32 losses, parameters, and optimizer state.
 - AdamW: learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
   weight decay 0.01 for matrices, gradient clipping 1.0.
@@ -95,9 +112,22 @@ derive from that cursor and the seed. Changing batch topology, precision,
 encoder, architecture, seed, optimizer settings, or dataset prevents resume.
 Epoch bounds and session time can increase without resetting the run.
 
+Default output directories include mode and device count, for example
+`magicbox-smoke-1dev` and `magicbox-full-8dev`. The full run starts from the
+pretrained encoder; the single-device smoke checkpoint remains a separate
+test artifact. Data parallelism replicates weights and optimizer state on
+each device. The smaller smoke batch and schema chunks reduce activation
+memory; actual TPU memory and throughput still require the hardware run.
+
+The default dataset is `protodotdesign/magicbox-v1`, revision
+`f074bb549f16ea091fd8ece12e79652b8082871f`. It contains 693,376 records across
+141 Parquet shards, including 446,751 training records. The notebook downloads
+the processed shards, tokenizer, and metadata. `DATASET` can instead point
+to a local completed dataset.
+
 Kaggle's output directory contains checkpoints, metrics, `run.json`, a JSONL
 progress log, and step-numbered inference bundles. For another session, attach
-the previous output and point `RESUME_FROM` at its `magicbox-run` folder.
+the previous output and point `RESUME_FROM` at its run folder.
 Scratch dependencies, source weights, and Arrow caches live outside output.
 Each exported session bundle is retained; users can archive earlier bundles
 once they have copied the desired inference artifact.
@@ -142,7 +172,7 @@ question, bucket construction, and identical record order after resume.
 
 No full pretrained training run or TPU execution was launched locally.
 The notebook contains a 2-update full-model TPU startup check before the
-long run. TPU peak memory, throughput, pretrained PyTorch/JAX activation
+remaining smoke or full run. TPU peak memory, throughput, pretrained PyTorch/JAX activation
 parity, and held-out semantic accuracy remain unmeasured. The default dense
 XLA attention path is correct under the CPU checks; hardware measurements
 will determine whether a fused TPU attention kernel is worth adding.
