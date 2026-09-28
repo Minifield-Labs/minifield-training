@@ -19,16 +19,16 @@ from minifield_training.objectives import schema_fields as objective
 
 def test_consumer_contract_snapshot() -> None:
     """Pin the producer document and the consumer's versioned constants."""
-    root = Path(__file__).resolve().parents[2] / "docs/contracts"
-    identity = json.loads((root / "magicbox-data-format-v1.json").read_text())
+    root = (
+        Path(__file__).resolve().parents[2]
+        / "src/minifield_training/datasets/magicbox"
+    )
+    identity = json.loads((root / "format-v1.json").read_text())
     assert (
         identity["sha256"]
         == "a3c93f2385ee3a99ca40696c6d2384ccb2e49fa35017c846ee1250632b2d86ab"
     )
-    assert (
-        json_io.digest_file(root / "magicbox-data-format-v1.md")
-        == identity["sha256"]
-    )
+    assert json_io.digest_file(root / "format-v1.md") == identity["sha256"]
     assert (
         identity["format"],
         identity["template"],

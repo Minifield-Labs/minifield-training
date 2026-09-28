@@ -40,9 +40,10 @@ No vocabulary-output matrix or second encoder parameter copy is created.
 
 ## Dataset contract
 
-The consumer snapshot is [the format document](contracts/magicbox-data-format-v1.md),
+The dataset's consumer snapshot is
+[the format document](../src/minifield_training/datasets/magicbox/format-v1.md),
 with its producer revision and checksum in
-[the snapshot identity](contracts/magicbox-data-format-v1.json).
+[the snapshot identity](../src/minifield_training/datasets/magicbox/format-v1.json).
 The supported format is `minifield.magicbox/1.0`, schema template
 `magicbox-rows/1`, and offset policy `trim-text-preserve-whitespace/2`.
 

@@ -91,3 +91,10 @@ byte tokens. `trim_offsets` provides the explicit whitespace-edge policy;
 `probabilities` admits finite hard/soft target distributions. Product adapters
 own request keys, schema wording, release pins, and their special-token rules.
 The package stays CPU-only and imports no optional tokenizer/Arrow libraries.
+
+## Dataset contract snapshots
+
+Keep each dataset's format documentation and snapshot identity in its own
+directory here. The MagicBox dataset's [v1 format](magicbox/format-v1.md) and
+[producer revision/checksum](magicbox/format-v1.json) define its published
+record contract.
