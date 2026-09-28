@@ -112,6 +112,27 @@ def test_source_rejects_incompatible_batch_cursor(
         next(batches)
 
 
+def test_source_preserves_published_shuffle_and_partial_chunk() -> None:
+    """Both saved NumPy shuffles retain their original order after migration."""
+    rows = _rows()
+    rows.append({**rows[-1], "game_id": 4})
+    strategy = dense.DenseBatchStrategy(
+        contracts.BatchShape(1, 3, 512, 0, 100),
+        batching.ClassTargets((True,) * 7 + (False,), 7),
+    )
+    batches = source.HFDatasetBatchSource(
+        Dataset.from_list(rows), _tokenizer(), strategy, seed=17
+    )
+    # The outer permutation is [4, 0, 2, 1, 3]. The original dense strategy
+    # shuffles each chunk again: [0, 2, 1] for 3 rows, [0, 1] for 2 rows.
+    expected = [
+        ("game-4-tick-3", "game-2-tick-2", "game-0-tick-0"),
+        ("game-1-tick-1", "game-3-tick-3"),
+    ]
+    assert [batch.example_ids for batch in batches(0)] == expected
+    assert [batch.example_ids for batch in batches(1)] == expected[1:]
+
+
 def test_block_policy_binds_checkpoint_source() -> None:
     """Different gradient paths cannot silently share a checkpoint."""
     cfg = model.Config(4, 8, 1, 1, 8, ("conv",))

@@ -1,67 +1,15 @@
-"""Versioned MagicBox requests, schema templates, and exact span admission."""
+"""MagicBox v1 wire admission and pinned product schema wording."""
 
 from collections.abc import Callable
-import dataclasses
-import math
 from typing import cast
+
+from minifield_training.core import json_io
+from minifield_training.datasets import fields
 
 FORMAT = "minifield.magicbox/1.0"
 TEMPLATE = "magicbox-rows/1"
 OFFSET_POLICY = "trim-text-preserve-whitespace/2"
 KINDS = ("extract", "choice", "noul", "score")
-
-
-@dataclasses.dataclass(frozen=True)
-class Encoding:
-    """Native IDs and Python-character offsets, including special tokens."""
-
-    ids: tuple[int, ...]
-    offsets: tuple[tuple[int, int], ...]
-    special: tuple[bool, ...]
-
-    @property
-    def selectable(self) -> tuple[bool, ...]:
-        """Select only non-special tokens with nonempty source ranges."""
-        return tuple(
-            not special and end > start
-            for (start, end), special in zip(
-                self.offsets, self.special, strict=True
-            )
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class Field:
-    """Public row tokens and private, separately stored field supervision."""
-
-    key: str
-    kind: int
-    candidates: tuple[str, ...]
-    rows: tuple[tuple[int, ...], ...]
-    targets: tuple[float, ...]
-    supervised: bool
-    token_supervised: bool
-    span: tuple[int, int] | None
-    legend: tuple[str, ...] = ()
-
-
-@dataclasses.dataclass(frozen=True)
-class Record:
-    """One source with independently encoded schema rows and gold fields."""
-
-    id: str
-    text: str
-    source: Encoding
-    fields: tuple[Field, ...]
-
-
-def object_map(value: object) -> dict[str, object]:
-    """Admit a JSON object with string keys."""
-    if not isinstance(value, dict) or any(
-        not isinstance(key, str) for key in value
-    ):
-        raise ValueError("Expected a JSON object")
-    return cast(dict[str, object], value)
 
 
 def _text(value: object) -> str:
@@ -81,7 +29,7 @@ def schema_rows(
     instructions = _text(question.get("instructions"))
     prefix = f"Type: {kind}\nQuestion: {instructions}"
     if kind == "choice":
-        criteria = object_map(question.get("criteria"))
+        criteria = json_io.object_map(question.get("criteria"))
         if not criteria:
             raise ValueError("Choice requires candidates")
         return tuple(criteria), tuple(
@@ -98,7 +46,7 @@ def schema_rows(
             for index, value in enumerate(levels)
         )
     if kind == "noul" and question.get("criteria") is not None:
-        binary = object_map(question["criteria"])
+        binary = json_io.object_map(question["criteria"])
         if set(binary) != {"true", "false"} or any(
             not isinstance(value, str) for value in binary.values()
         ):
@@ -108,69 +56,11 @@ def schema_rows(
     return ("",), (prefix,)
 
 
-def aligned_span(source: Encoding, span: object, text: str) -> tuple[int, int]:
-    """Admit exact boundaries, keeping all overlapping UTF-8 byte tokens."""
-    if (
-        not isinstance(span, list)
-        or len(span) != 2
-        or any(
-            not isinstance(value, int) or isinstance(value, bool)
-            for value in span
-        )
-    ):
-        raise ValueError("Invalid character span")
-    start, end = cast(list[int], span)
-    if not 0 <= start < end <= len(text):
-        raise ValueError("Character span outside source")
-    indices = [
-        index
-        for index, ((left, right), valid) in enumerate(
-            zip(source.offsets, source.selectable, strict=True)
-        )
-        if valid and right > start and left < end
-    ]
-    if not indices:
-        raise ValueError("Unalignable span")
-    first, last = indices[0], indices[-1]
-    if source.offsets[first][0] != start or source.offsets[last][1] != end:
-        raise ValueError("Gold span splits a token")
-    previous = (-1, -1)
-    for index in range(first, last + 1):
-        left, right = source.offsets[index]
-        if (
-            not source.selectable[index]
-            or not start <= left < right <= end
-            or left < previous[0]
-            or right < previous[1]
-        ):
-            raise ValueError("Invalid interior token offset")
-        previous = (left, right)
-    return first, last + 1
-
-
-def _probabilities(
-    values: tuple[object, ...], *, distribution: bool
-) -> tuple[float, ...]:
-    """Reject nonfinite targets and malformed probability distributions."""
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not math.isfinite(value)
-        or not 0 <= value <= 1
-        for value in values
-    ):
-        raise ValueError("Invalid target probability")
-    result = tuple(float(cast(float, value)) for value in values)
-    if distribution and not math.isclose(sum(result), 1, abs_tol=1e-5):
-        raise ValueError("Target distribution must sum to one")
-    return result
-
-
 def _targets(
     kind: int,
     candidates: tuple[str, ...],
     target: dict[str, object],
-    source: Encoding,
+    source: fields.Encoding,
     text: str,
 ) -> tuple[tuple[float, ...], bool, tuple[int, int] | None]:
     """Normalize hard and soft labels without putting them in schema rows."""
@@ -183,7 +73,7 @@ def _targets(
         ):
             raise ValueError("Absent extraction has a span")
         span = (
-            aligned_span(source, target["span"], text)
+            fields.aligned_span(source, target["span"], text)
             if present and target.get("span") is not None
             else None
         )
@@ -196,7 +86,9 @@ def _targets(
         return (float(present),), not present or span is not None, span
     if kind == 2:
         return (
-            _probabilities((target.get("probability"),), distribution=False),
+            fields.probabilities(
+                (target.get("probability"),), distribution=False
+            ),
             False,
             None,
         )
@@ -206,7 +98,7 @@ def _targets(
     if "probabilities" in target:
         probabilities = target["probabilities"]
         if kind == 1:
-            mapping = object_map(probabilities)
+            mapping = json_io.object_map(probabilities)
             if set(mapping) != set(candidates):
                 raise ValueError("Choice distribution keys differ")
             values = tuple(mapping[key] for key in candidates)
@@ -216,7 +108,7 @@ def _targets(
             values = tuple(probabilities)
         else:
             raise ValueError("Score distribution length differs")
-        return _probabilities(values, distribution=True), False, None
+        return fields.probabilities(values, distribution=True), False, None
     label = target.get(label_key)
     if kind == 1 and not isinstance(label, str):
         raise ValueError("Choice targets must be string identifiers")
@@ -231,37 +123,37 @@ def compile_record(
     record_id: str,
     request: object,
     targets: object,
-    encode: Callable[[str], Encoding],
-) -> Record:
+    encode: Callable[[str], fields.Encoding],
+) -> fields.Record:
     """Compile public input separately from optional private targets."""
-    public, gold = object_map(request), object_map(targets)
+    public, gold = json_io.object_map(request), json_io.object_map(targets)
     text = public.get("state")
     if not isinstance(text, str):
         raise ValueError("State must be a string")
-    questions = object_map(public.get("questions"))
+    questions = json_io.object_map(public.get("questions"))
     if not questions or not set(gold) <= set(questions):
         raise ValueError("Invalid question or supervision keys")
     source = encode(text)
     if not source.ids or source.ids[0] != 1:
         raise ValueError("Source must include the native BOS token")
-    fields = []
+    compiled_fields = []
     for key, raw in questions.items():
         _text(key)
-        question = object_map(raw)
+        question = json_io.object_map(raw)
         candidates, texts = schema_rows(question)
         kind = KINDS.index(str(question["type"]))
         values, token_supervised, span = ((0.0,) * len(texts), False, None)
         if key in gold:
             values, token_supervised, span = _targets(
-                kind, candidates, object_map(gold[key]), source, text
+                kind, candidates, json_io.object_map(gold[key]), source, text
             )
         rows = tuple(encode(row).ids for row in texts)
         if any(not row or row[0] != 1 for row in rows):
             raise ValueError(
                 "Schema BOS/readout token must be ID 1 at position 0"
             )
-        fields.append(
-            Field(
+        compiled_fields.append(
+            fields.Field(
                 key,
                 kind,
                 candidates,
@@ -275,4 +167,27 @@ def compile_record(
                 else (),
             )
         )
-    return Record(record_id, text, source, tuple(fields))
+    return fields.Record(record_id, text, source, tuple(compiled_fields))
+
+
+def format_results(
+    record: fields.Record,
+    predictions: dict[str, object],
+    confidence: Callable[[dict[str, object]], float | None] | None = None,
+) -> dict[str, object]:
+    """Format the public typed response with optional confidence."""
+    result: dict[str, object] = {}
+    for field in record.fields:
+        prediction = json_io.object_map(predictions[field.key])
+        kind = KINDS[field.kind]
+        item: dict[str, object] = {"type": kind, kind: prediction["value"]}
+        if kind != "noul":
+            item["confidence"] = confidence(prediction) if confidence else None
+        if kind in ("choice", "score"):
+            item["probabilities"] = prediction["probabilities"]
+        if kind == "score":
+            item["legend"] = {
+                str(index): text for index, text in enumerate(field.legend)
+            }
+        result[field.key] = item
+    return result

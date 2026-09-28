@@ -86,14 +86,12 @@ weights into model forward. FP32 masters and Adam moments stay unquantized.
 This first recipe applies full fake quantization from update 1. A ramp schedule
 and TPU qualification need separate evidence.
 
-`magicbox` injects the bidirectional LFM encoder into the independent
-MagicBox family and builds a streaming step with all parameters trainable.
-The existing `data` mesh shards requests, preserving every field's candidate
-group on its request's device. It reuses the existing full-weight AdamW,
-accumulation, checkpoint, and run lifecycle.
+## Schema-field supervision
 
-`magicbox_bundle.save/load` persists and verifies the complete inference
-bundle: exact encoder config, fusion config, one shared parameter tree,
-tokenizer and offset contract, per-file checksums, and decode threshold.
-Its version is `minifield.magicbox.model/1`. Runtime Rust consumption remains
-a separate integration. Tiny save/load tests reproduce logits exactly.
+`schema_fields.make_step(forward, inventory, optimizer, mesh=None)` binds typed
+field losses to the shared streaming update engine. The caller supplies a
+training forward and complete parameter inventory. It imports no concrete model
+and owns no checkpoint writer, tokenizer, dataset wire format, or release pin.
+The example binds its selected encoder and heads through this interface.
+Independent tests train an unrelated four-scalar model and compare analytical
+gradients across multiple microbatch partitions.

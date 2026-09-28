@@ -1,11 +1,9 @@
 """Read immutable Hugging Face decision rows into physical updates."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
-import math
 from pathlib import Path
-import time
 from typing import Any, cast
 
 from datasets import Dataset  # type: ignore[import-untyped]
@@ -16,6 +14,7 @@ from tokenizers import Tokenizer  # type: ignore[import-untyped]
 from examples.polyomino import engine
 from examples.polyomino import serialize
 from minifield_training.batching import contracts as batching
+from minifield_training.batching import stream
 from minifield_training.core import json_io
 from minifield_training.datasets.labeled import LabeledSequence
 from minifield_training.models.lfm2_5 import pretrained
@@ -104,30 +103,42 @@ class HFDatasetBatchSource:
         self, start_update: int, deadline: float | None = None
     ) -> Iterator[batching.PhysicalUpdate]:
         """Resume at an update boundary without reusing earlier rows."""
-        if start_update < 0:
-            raise ValueError("Negative update cursor")
-        capacity = self.strategy.shape.capacity
+        return stream.EpochStream(
+            record_count=len(self.data),
+            capacity=self.strategy.shape.capacity,
+            epochs=1,
+            read_epoch=self._read_epoch,
+            compile_record=lambda row: sequence_from_row(row, self.tokenizer),
+            pack=self._pack,
+        )(start_update, deadline)
+
+    def _read_epoch(
+        self, unused_epoch: int
+    ) -> stream.ChunkReader[Mapping[str, object]]:
+        """Keep the published NumPy permutation and bounded Arrow reads."""
         order = np.random.default_rng(self.seed).permutation(len(self.data))
-        total = math.ceil(len(order) / capacity)
-        for update_index in range(start_update, total):
-            if deadline is not None and time.monotonic() >= deadline:
-                return
-            selected = [
-                int(index)
-                for index in order[
-                    update_index * capacity : (update_index + 1) * capacity
-                ]
-            ]
+
+        def read(start: int, stop: int) -> Sequence[Mapping[str, object]]:
+            selected = [int(index) for index in order[start:stop]]
             columns = cast(dict[str, list[Any]], self.data[selected])
-            examples = [
-                sequence_from_row(
-                    {key: values[offset] for key, values in columns.items()},
-                    self.tokenizer,
-                )
+            return [
+                {key: values[offset] for key, values in columns.items()}
                 for offset in range(len(selected))
             ]
-            if self.strategy.update_count(examples) != 1:
-                raise ValueError(
-                    "HF decision chunks must produce exactly one update"
-                )
-            yield from self.strategy.iter_updates(examples, seed=self.seed)
+
+        return read
+
+    def _pack(
+        self, examples: Sequence[LabeledSequence], unused_update: int
+    ) -> batching.PhysicalUpdate:
+        """Retain the existing seeded shuffle within each dense chunk."""
+        if self.strategy.update_count(examples) != 1:
+            raise ValueError(
+                "HF decision chunks must produce exactly one update"
+            )
+        updates = tuple(self.strategy.iter_updates(examples, seed=self.seed))
+        if len(updates) != 1:
+            raise ValueError(
+                "HF decision chunks must produce exactly one update"
+            )
+        return updates[0]

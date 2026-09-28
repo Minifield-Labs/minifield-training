@@ -5,8 +5,9 @@ from pathlib import Path
 
 from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
+from examples.magicbox import data as magicbox
 from minifield_training.core import json_io
-from minifield_training.datasets import magicbox
+from minifield_training.datasets import fields
 from minifield_training.models.lfm2_5 import encoder
 
 TOKENIZER_SHA256 = (
@@ -18,7 +19,7 @@ class Adapter:
     """Load the saved native IDs; apply offset policy outside the tokenizer."""
 
     def __init__(self, directory: Path):
-        self.contract = magicbox.object_map(
+        self.contract = json_io.object_map(
             json.loads((directory / "contract.json").read_text())
         )
         expected = {
@@ -42,21 +43,15 @@ class Adapter:
         self.tokenizer.no_padding()
         self.tokenizer.no_truncation()
 
-    def encode(self, text: str) -> magicbox.Encoding:
+    def encode(self, text: str) -> fields.Encoding:
         """Trim edges of text tokens while preserving whitespace-only tokens."""
         encoded = self.tokenizer.encode(text, add_special_tokens=True)
-        offsets = []
-        for (start, end), special in zip(
-            encoded.offsets, encoded.special_tokens_mask, strict=True
-        ):
-            if not special and text[start:end].strip():
-                while start < end and text[start].isspace():
-                    start += 1
-                while end > start and text[end - 1].isspace():
-                    end -= 1
-            offsets.append((start, end))
-        return magicbox.Encoding(
+        return fields.Encoding(
             tuple(encoded.ids),
-            tuple(offsets),
+            fields.trim_offsets(
+                text,
+                tuple(encoded.offsets),
+                tuple(bool(value) for value in encoded.special_tokens_mask),
+            ),
             tuple(bool(value) for value in encoded.special_tokens_mask),
         )

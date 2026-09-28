@@ -9,11 +9,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from examples.magicbox import data as magicbox
 from examples.magicbox import smoke
-from minifield_training.batching import magicbox as batching
+from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
-from minifield_training.datasets import magicbox
-from minifield_training.objectives import magicbox as objective
+from minifield_training.datasets import fields
+from minifield_training.objectives import schema_fields as objective
 
 
 def test_consumer_contract_snapshot() -> None:
@@ -57,15 +58,15 @@ def test_templates_keep_choice_order_and_score_ranks() -> None:
 
 def test_unicode_overlaps_and_unalignable_boundaries() -> None:
     """Keep all byte tokens overlapping one Unicode character."""
-    encoded = magicbox.Encoding(
+    encoded = fields.Encoding(
         (1, 2, 3, 4, 5),
         ((0, 0), (0, 1), (0, 1), (1, 2), (2, 5)),
         (True, False, False, False, False),
     )
-    assert magicbox.aligned_span(encoded, [0, 1], "é Ada") == (1, 3)
-    assert magicbox.aligned_span(encoded, [0, 5], "é Ada") == (1, 5)
+    assert fields.aligned_span(encoded, [0, 1], "é Ada") == (1, 3)
+    assert fields.aligned_span(encoded, [0, 5], "é Ada") == (1, 5)
     with pytest.raises(ValueError, match="splits a token"):
-        magicbox.aligned_span(encoded, [3, 5], "é Ada")
+        fields.aligned_span(encoded, [3, 5], "é Ada")
 
 
 def test_type_balancing_partial_labels_and_no_supervision() -> None:
@@ -75,7 +76,11 @@ def test_type_balancing_partial_labels_and_no_supervision() -> None:
         record, id="second", fields=(record.fields[1],)
     )
     packed = batching.build(
-        [record, second], batching.Shape(2, 1, 16, 64, 8), seed=5, update=3
+        [record, second],
+        batching.Shape(2, 1, 16, 64, 8, 128, 0),
+        seed=5,
+        update=3,
+        weighting=objective.balance_types,
     )
     weights = np.asarray(packed.microbatches["field_weight"])
     np.testing.assert_allclose(weights.sum(), 1)
@@ -108,7 +113,11 @@ def test_type_balancing_partial_labels_and_no_supervision() -> None:
     )
     with pytest.raises(ValueError, match="no_supervision"):
         batching.build(
-            [missing], batching.Shape(1, 1, 16, 64, 8), seed=0, update=0
+            [missing],
+            batching.Shape(1, 1, 16, 64, 8, 128, 0),
+            seed=0,
+            update=0,
+            weighting=objective.balance_types,
         )
 
 

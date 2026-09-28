@@ -9,22 +9,25 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from examples.magicbox import bundle as magicbox_bundle
+from examples.magicbox import composition as magicbox
 from examples.magicbox import smoke
-from minifield_training.batching import magicbox as batching
+from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
 from minifield_training.models.lfm2_5 import encoder
-from minifield_training.strategies import magicbox
-from minifield_training.strategies import magicbox_bundle
-from scripts import build_magicbox_notebook
+from minifield_training.objectives import schema_fields as objective
 
 
-def test_notebook_snapshot_and_python_cells() -> None:
-    """Verify the embedded source and notebook Python cells."""
-    actual = json.loads(build_magicbox_notebook.DESTINATION.read_text())
-    assert actual == build_magicbox_notebook.notebook()
+def test_notebook_python_cells() -> None:
+    """Verify the committed notebook's executable, unexecuted Python cells."""
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb"
+    )
+    actual = json.loads(path.read_text())
     for cell in actual["cells"]:
         if cell["cell_type"] == "code":
-            ast.parse(cell["source"])
+            ast.parse("".join(cell["source"]))
             assert not cell["outputs"] and cell["execution_count"] is None
 
 
@@ -75,7 +78,11 @@ def test_tiny_bundle_roundtrip(
     assert decode == {"presence_threshold": 0.5, "confidence": None}
     assert len(restored) == len(parameters)
     packed = batching.build(
-        [smoke.fixture()], batching.Shape(1, 1, 16, 64, 8), seed=0, update=0
+        [smoke.fixture()],
+        batching.Shape(1, 1, 16, 64, 8, 128, 0),
+        seed=0,
+        update=0,
+        weighting=objective.balance_types,
     )
     batch = {
         key: jnp.asarray(value[0]) for key, value in packed.microbatches.items()
@@ -85,7 +92,9 @@ def test_tiny_bundle_roundtrip(
     for key in expected:
         np.testing.assert_array_equal(actual[key], expected[key])
     (bundle / "tokenizer/contract.json").write_text("{}")
-    with pytest.raises(ValueError, match="Changed bundle asset"):
+    with pytest.raises(
+        ValueError, match="SHA-256 mismatch: tokenizer/contract.json"
+    ):
         magicbox_bundle.load(bundle)
 
 

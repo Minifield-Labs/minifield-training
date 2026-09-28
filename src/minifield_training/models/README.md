@@ -44,7 +44,8 @@ output heads, norms, and depthwise taps aren't candidates.
 `lfm2.*` tensors, totaling 354,483,968 parameters. It composes centered
 short convolutions, bidirectional pad-masked GQA, QK RMSNorm, RoPE, and the
 family's SwiGLU blocks. Every block rematerializes in reverse mode. It doesn't
-construct or load an unused vocabulary head.
+construct or load an unused vocabulary head. `encoder.MAX_SEQUENCE_LENGTH`
+owns its admitted 8,192-token limit independently of the source RoPE metadata.
 
 `magicbox.model` accepts an injected shared encoder callable. Source tokens
 are encoded once per request; independent schema rows read the resulting

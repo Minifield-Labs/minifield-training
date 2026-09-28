@@ -10,6 +10,7 @@ that implements them, and record dated evidence against the revision tested.
 | [Architecture](architecture.md) | Responsibilities and enforced import boundaries |
 | [Duplication policy](duplication.md) | Clone detection, size limits and review limits |
 | [Procedure](procedure.md) | Required checks and completion criteria |
+| [Schema component audit](schema-components-audit.md) | Ownership findings and compatibility evidence |
 
 Each directory under `src/minifield_training/` has a README naming its
 owner. With its first implementation, update that README with public contracts,

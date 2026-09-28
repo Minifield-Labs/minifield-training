@@ -4,16 +4,15 @@ import argparse
 import json
 from pathlib import Path
 
-import jax.numpy as jnp
-import numpy as np
-
-from examples.magicbox import source
+from examples.magicbox import bundle as magicbox_bundle
+from examples.magicbox import composition as magicbox
+from examples.magicbox import data
 from examples.magicbox import tokenizer
-from minifield_training.batching import magicbox as batching
-from minifield_training.datasets import magicbox as data
-from minifield_training.evaluation import magicbox as decoding
-from minifield_training.strategies import magicbox
-from minifield_training.strategies import magicbox_bundle
+from minifield_training.batching import schema_fields as batching
+from minifield_training.core import json_io
+from minifield_training.evaluation import schema_fields as evaluation
+from minifield_training.models.lfm2_5 import encoder
+from minifield_training.objectives import schema_fields as objective
 
 
 def main() -> None:
@@ -23,7 +22,7 @@ def main() -> None:
     parser.add_argument("--request", type=Path, required=True)
     parser.add_argument("--fp32", action="store_true")
     args = parser.parse_args()
-    request = data.object_map(json.loads(args.request.read_text()))
+    request = json_io.object_map(json.loads(args.request.read_text()))
     if request.get("questions") == {}:
         print("{}")
         return
@@ -33,37 +32,23 @@ def main() -> None:
     maximum = batching.Shape(
         1,
         1,
-        8192,
-        8192,
+        encoder.MAX_SEQUENCE_LENGTH,
+        encoder.MAX_SEQUENCE_LENGTH,
         max(sum(len(field.rows) for field in record.fields), 4),
+        cfg.vocab_size,
+        0,
     )
-    packed = batching.build(
-        [record],
-        source.bucket([record], maximum),
-        seed=0,
-        update=0,
-        allow_unsupervised=True,
-    )
-    batch = {
-        key: jnp.asarray(value[0]) for key, value in packed.microbatches.items()
-    }
-    outputs = magicbox.forward(
-        parameters, cfg, fusion, batch, bf16=not args.fp32
-    )
-    arrays = {key: np.asarray(value)[0] for key, value in outputs.items()}
-    predictions = decoding.decode(
-        record,
-        {
-            key: value.tolist()
-            for key, value in arrays.items()
-            if key != "tokens"
-        },
-        arrays["tokens"].tolist(),
+    predictor = evaluation.Predictor(
+        magicbox.bind(cfg, fusion, bf16=not args.fp32),
+        batching.SchemaBatchStrategy(
+            maximum, objective.balance_types, min_tokens=128, min_rows=4
+        ),
         presence_threshold=float(str(decode_config["presence_threshold"])),
     )
+    predictions, _ = predictor.score(parameters, record, include_losses=False)
     print(
         json.dumps(
-            decoding.format_results(record, predictions),
+            data.format_results(record, predictions),
             ensure_ascii=False,
             indent=2,
         )

@@ -6,7 +6,6 @@ import dataclasses
 import hashlib
 import json
 from pathlib import Path
-import re
 import time
 from typing import cast
 
@@ -20,6 +19,7 @@ from examples.polyomino.evaluate import make_evaluator
 from minifield_training.batching import classification as class_batching
 from minifield_training.batching import contracts as batch_contracts
 from minifield_training.batching import dense
+from minifield_training.checkpoints import discovery
 from minifield_training.checkpoints import inference_output
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
@@ -154,48 +154,6 @@ def verify_checkpoint_roundtrip(
     compare_group("v", current["v"], restored["v"])
 
 
-def latest_checkpoint(
-    root: Path, *, run_id: str, data_sha256: str, source_id: str
-) -> Path | None:
-    """Find the newest complete directory with this run's cursor identity."""
-    if not root.exists():
-        return None
-    candidates: list[tuple[int, Path]] = []
-    for directory in root.iterdir():
-        match = re.fullmatch(r"step-([0-9]{8,})", directory.name)
-        if match is None or directory.is_symlink() or not directory.is_dir():
-            continue
-        if {child.name for child in directory.iterdir()} != {
-            "manifest.json",
-            "state.safetensors",
-        }:
-            continue
-        if any(child.is_symlink() for child in directory.iterdir()):
-            continue
-        try:
-            raw: object = json.loads(
-                (directory / "manifest.json").read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(raw, dict):
-            continue
-        cursor = raw.get("cursor")
-        if not isinstance(cursor, dict):
-            continue
-        if (
-            cursor.get("run_id") == run_id
-            and cursor.get("data_sha256") == data_sha256
-            and cursor.get("source_id") == source_id
-            # bool is an int subclass, but cursor steps require plain integers.
-            # pylint: disable-next=unidiomatic-typecheck
-            and type(cursor.get("next_batch")) is int
-            and cursor["next_batch"] == int(match.group(1))
-        ):
-            candidates.append((cursor["next_batch"], directory))
-    return max(candidates)[1] if candidates else None
-
-
 def main(
     output_strategy: inference_output.OutputStrategy | None = None,
 ) -> None:
@@ -281,7 +239,7 @@ def main(
         quantization_kind=qat.identity if qat is not None else None,
     )
     resume_path = (
-        latest_checkpoint(
+        discovery.latest_checkpoint(
             args.checkpoint_root,
             run_id=args.run_id,
             data_sha256=data_sha256,

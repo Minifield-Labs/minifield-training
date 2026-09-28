@@ -32,6 +32,9 @@ There is no added newline, encoding step or Unicode normalization, and lone
 surrogates are preserved. A stricter wire contract (UTF-16 key ordering, a safe
 integer domain, scalar validation) would belong to a separate module.
 
+`object_map(value)` admits a dictionary with string keys without coercing keys
+or imposing a product schema.
+
 `digest_file(path: pathlib.Path) -> str` streams binary reads of 8 MiB into
 SHA-256 and returns the lowercase hex digest. It applies no admission, symlink
 or expected-hash policy; those belong to callers.
@@ -39,7 +42,7 @@ or expected-hash policy; those belong to callers.
 Tests: `uv run --no-sync pytest tests/core/test_json_io.py` with literal
 expected bytes in [test_json_io.py](../../../tests/core/test_json_io.py).
 Parameter inventory identity and optimizer configuration identity use canonical
-JSON. CPU artifact inspection remains unimplemented.
+JSON. CPU file inventory inspection lives in `artifacts.files`.
 
 ## `minifield_training.core.parameters`
 
@@ -82,7 +85,7 @@ hashing or dtype enforcement. Use `build_inventory` for those supported
 construction checks. Tied aliases must already be resolved to unique stored
 rows before calling it. The model adapter supplies shapes and policy; the AdamW
 transaction consumes the resulting trainability and decay flags. Checkpoint
-inspection remains unimplemented.
+discovery and restoration live in `checkpoints`.
 
 Tests: `uv run --no-sync pytest tests/core/` covers record views and immutability,
 explicit decay selection, rejected memberships, FP32 masters and digest changes.

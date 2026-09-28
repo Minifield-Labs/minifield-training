@@ -1,9 +1,9 @@
 """Deterministic typed decoding and exact source-substring extraction."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 import math
 
-from minifield_training.datasets import magicbox
+from minifield_training.datasets import fields
 
 
 def best_span(
@@ -49,7 +49,7 @@ def probabilities(values: Sequence[float]) -> list[float]:
 
 
 def decode(
-    record: magicbox.Record,
+    record: fields.Record,
     logits: Mapping[str, Sequence[float]],
     token_logits: Sequence[Sequence[float]],
     *,
@@ -106,27 +106,4 @@ def decode(
             details.update(presence=present, token_logits=tokens)
         result[field.key] = {"value": value, **details}
         row += count
-    return result
-
-
-def format_results(
-    record: magicbox.Record,
-    predictions: dict[str, object],
-    confidence: Callable[[dict[str, object]], float | None] | None = None,
-) -> dict[str, object]:
-    """Format the public typed response with optional confidence."""
-    result: dict[str, object] = {}
-    for field in record.fields:
-        prediction = magicbox.object_map(predictions[field.key])
-        kind = magicbox.KINDS[field.kind]
-        item: dict[str, object] = {"type": kind, kind: prediction["value"]}
-        if kind != "noul":
-            item["confidence"] = confidence(prediction) if confidence else None
-        if kind in ("choice", "score"):
-            item["probabilities"] = prediction["probabilities"]
-        if kind == "score":
-            item["legend"] = {
-                str(index): text for index, text in enumerate(field.legend)
-            }
-        result[field.key] = item
     return result

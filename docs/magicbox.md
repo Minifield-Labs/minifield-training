@@ -1,10 +1,10 @@
 # MagicBox architecture and training
 
-The notebook is `examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb`. It embeds
-the complete training source and lockfile. Select a single-host TPU runtime,
-enable internet, and run the cells. It detects the visible TPU devices and
-downloads the pinned dataset from Hugging Face. The source archive is checked
-before extraction.
+The notebook is `examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb`. Setup clones
+`https://github.com/Minifield-Labs/minifield-training.git` and checks out commit
+`658d749528d85315f96b88ff6454bd74941f5907` before installing its locked dependencies.
+Select a single-host TPU runtime, enable internet, and run the cells. It detects
+the visible TPU devices and downloads the pinned dataset from Hugging Face.
 
 ## Architecture
 
@@ -172,8 +172,8 @@ question, bucket construction, and identical record order after resume.
 
 No full pretrained training run or TPU execution was launched locally.
 The notebook contains a 2-update full-model TPU startup check before the
-remaining smoke or full run. TPU peak memory, throughput, pretrained PyTorch/JAX activation
-parity, and held-out semantic accuracy remain unmeasured. The default dense
+remaining smoke or full run. TPU peak memory, throughput, pretrained
+PyTorch/JAX activation parity, and held-out semantic accuracy remain unmeasured. The default dense
 XLA attention path is correct under the CPU checks; hardware measurements
 will determine whether a fused TPU attention kernel is worth adding.
 
@@ -183,3 +183,11 @@ Its source SHA-256 is
 `f171f518be2a07da48b17fdea5655cad0a2452ab548e90e8ae903143686647e2`.
 The small committed inventory fixture came from the checkpoint's HTTP range
 header; no model weights or generated training records are committed.
+
+## Reusable ownership
+
+The model family retains the architecture and parameter names. Product wire
+admission and formatting, tokenizer pins, and encoder/head selection live in the
+example. Shared schema records, batching, weighting, evaluation, replay, artifact
+verification, and bundle I/O have task-level owners. See the
+[architecture audit and compatibility evidence](schema-components-audit.md).

@@ -77,10 +77,17 @@ It reads JSONL, prepares and tokenizes with an offline local vocabulary,
 replays a verified artifact, builds a padded update, and decreases selected
 next-token loss on the public tiny LFM2.5 model. This is CPU evidence only.
 
-`magicbox` is the CPU-only consumer of `minifield.magicbox/1.0`. It owns
-`Encoding`, `Field`, and `Record`, pinned `magicbox-rows/1` templates,
-partial-label admission, probability checks, and exact character-to-token
-span matching. Source and schema IDs remain separate from private targets.
-Unicode byte-token overlaps are retained; no span is snapped or normalized.
-The optional native tokenizer adapter and Parquet I/O live in the MagicBox
-example, keeping this package's dataset imports free of numerical libraries.
+## Schema-conditioned records
+
+`fields.Encoding`, `Field`, and `Record` describe token offsets, independently
+encoded schema rows, and separately stored supervision. `Kind` identifies
+extraction, categorical, binary, and ordinal tasks. `validate` checks configured
+vocabulary bounds, field grouping, normalized targets, and consistent extraction
+presence/span supervision. It imposes no BOS ID, tokenizer, template, product
+wire format, or context limit.
+
+`aligned_span` preserves exact character boundaries and overlapping Unicode
+byte tokens. `trim_offsets` provides the explicit whitespace-edge policy;
+`probabilities` admits finite hard/soft target distributions. Product adapters
+own request keys, schema wording, release pins, and their special-token rules.
+The package stays CPU-only and imports no optional tokenizer/Arrow libraries.

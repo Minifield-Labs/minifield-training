@@ -9,8 +9,8 @@ import pytest
 
 from examples.magicbox import smoke
 from minifield_training.core import json_io
-from minifield_training.datasets import magicbox
 from minifield_training.models.lfm2_5 import encoder
+from minifield_training.models.lfm2_5 import model
 
 
 def test_pinned_checkpoint_inventory() -> None:
@@ -19,7 +19,7 @@ def test_pinned_checkpoint_inventory() -> None:
     path = directory / "encoder_config.json"
     assert json_io.digest_file(path) == encoder.SOURCE.config_sha256
     cfg = encoder.Adapter().parse_config(
-        magicbox.object_map(json.loads(path.read_text()))
+        json_io.object_map(json.loads(path.read_text()))
     )
     published = json.loads((directory / "encoder_inventory.json").read_text())
     expected = {
@@ -56,3 +56,20 @@ def test_encoder_reads_future_and_preserves_padding(bf16: bool) -> None:
         atol=1e-5,
     )
     np.testing.assert_array_equal(padded[:, 4:], np.zeros((1, 3, 16)))
+
+
+def test_encoder_owned_context_boundary() -> None:
+    """Admit 8192 positions and reject 8193 before model computation."""
+    cfg = model.Config(4, 8, 1, 1, 2, ("conv",))
+    params = {
+        name: jnp.ones(shape)
+        for name, shape in encoder.Adapter().expected_shapes(cfg).items()
+    }
+    ids = jnp.zeros((1, 8192), dtype=jnp.int32)
+    assert encoder.MAX_SEQUENCE_LENGTH == 8192
+    assert encoder.encode(
+        params, cfg, ids, jnp.ones_like(ids), bf16=False
+    ).shape == (1, 8192, 4)
+    ids = jnp.zeros((1, 8193), dtype=jnp.int32)
+    with pytest.raises(ValueError, match="trained context limit"):
+        encoder.encode(params, cfg, ids, jnp.ones_like(ids))

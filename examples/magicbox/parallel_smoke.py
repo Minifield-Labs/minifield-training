@@ -7,10 +7,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from examples.magicbox import composition as magicbox
 from examples.magicbox import smoke
-from minifield_training.batching import magicbox as batching
+from minifield_training.batching import schema_fields as batching
+from minifield_training.objectives import schema_fields as objective
 from minifield_training.optimizers import adamw
-from minifield_training.strategies import magicbox
+from minifield_training.strategies import schema_fields as strategy
 
 
 def main() -> None:
@@ -30,15 +32,28 @@ def main() -> None:
         for index in range(8)
     ]
     packed = batching.build(
-        records, batching.Shape(1, 8, 16, 64, 8), seed=0, update=0
+        records,
+        batching.Shape(1, 8, 16, 64, 8, 128, 0),
+        seed=0,
+        update=0,
+        weighting=objective.balance_types,
     )
     batch = {
         key: jnp.asarray(value[0]) for key, value in packed.microbatches.items()
     }
     optimizer = adamw.AdamWConfig(learning_rate=0.001)
-    single = magicbox.make_step(cfg, fusion, optimizer, bf16=False)
+    single = strategy.make_step(
+        magicbox.bind(cfg, fusion, training=True, bf16=False),
+        magicbox.inventory(cfg, fusion),
+        optimizer,
+    )
     mesh = jax.sharding.Mesh(np.asarray(jax.devices()), ("data",))
-    parallel = magicbox.make_step(cfg, fusion, optimizer, mesh=mesh, bf16=False)
+    parallel = strategy.make_step(
+        magicbox.bind(cfg, fusion, training=True, bf16=False),
+        magicbox.inventory(cfg, fusion),
+        optimizer,
+        mesh=mesh,
+    )
     expected = single.gradient(params, batch)
     actual = parallel.gradient(params, batch)
     differences = []

@@ -123,3 +123,7 @@ checkpoint stores its full `params`, `m`, `v`, and `step` tensors in
 `model.safetensors`, pass `--warm-start-tensor-file model.safetensors`.
 The manifest hash and full inventory are still checked. Exact resume always
 uses the normal `state.safetensors` file and the QAT run's new identity.
+
+Checkpoint selection uses the shared `checkpoints.discovery.latest_checkpoint`
+service, including numeric step ordering, complete-file admission, and matching
+run/data/source cursor identities.

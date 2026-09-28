@@ -92,11 +92,12 @@ See [contributing](CONTRIBUTING.md) for commands and
 
 ## MagicBox training
 
-[The self-contained TPU notebook](examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb)
+[The TPU notebook](examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb)
 trains the LFM2.5 Encoder 350M MagicBox architecture on the completed
 `minifield.magicbox/1.0` dataset. It includes an offline tiny-model check,
 a 2-update full-model TPU check, all-parameter training, exact resume,
-held-out evaluation, inference export, and reload/prediction.
+held-out evaluation, inference export, and reload/prediction. Setup clones
+the training repository from GitHub and checks out a pinned commit.
 
 It detects single-host TPU device counts and defaults to a 10-update smoke
 run. Set `RUN_MODE = 'full'` for the 3-epoch recipe, with a 32-request logical

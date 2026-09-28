@@ -33,7 +33,8 @@ decisions = decision_batches.iter_updates(decision_records, seed=17)
 Model inputs and attention masks have shape `[M, B, T]`. Token targets have
 the same shape; class labels and valid-row masks have shape `[M, B]`.
 `PhysicalUpdate.active` is a NumPy boolean `[M]` vector for host slot selection.
-All arrays in `microbatches` are JAX arrays. The scanned JIT step places `active`
+Dense batches hold JAX arrays in `microbatches`. Schema batches hold host arrays
+for transfer by the streaming engine. The scanned JIT step places `active`
 at its call boundary; direct eager calls should use `jnp.asarray(active)`.
 The streaming step consumes host flags directly.
 
@@ -53,17 +54,27 @@ optional absolute deadline. The shared runner consumes either interface.
 Sequence packing isn't implemented. Concatenating records needs segment-aware
 attention and an objective that preserves supervision boundaries.
 
-`magicbox.build` emits the same `PhysicalUpdate` contract for the different
-MagicBox layout: `[microbatches, requests, schema_rows, schema_tokens]` and
-one source sequence per request. It records field ownership and candidate
-order explicitly; the request axis supplies source ownership after sharding.
-`Shape` limits are operational and never change head parameters. Overflow
-raises; nothing is truncated. Replay seeds bind update, record, field, and
-candidate identities.
+## Schema-conditioned batches
 
-Field weights are calculated before device or microbatch slicing. The first
-row of each labeled field carries its weight; further candidate rows carry
-zero. Each task type contributes its mean field loss, followed by a weighted
-mean across active types. `type_weights` defaults to `(1, 1, 1, 1)`.
-Unsupervised training batches raise `no_supervision` before an optimizer
-transaction. `allow_unsupervised=True` is reserved for inference compilation.
+`schema_fields.SchemaBatchStrategy` implements the same `BatchStrategy`
+contract for `[microbatches, requests, schema_rows, schema_tokens]` plus one
+source sequence per request. `contracts.CapacityShape` exposes only logical
+capacity, allowing dense and multi-sequence layouts to share the interface.
+
+`schema_fields.Shape` requires explicit vocabulary and pad token IDs. The model
+adapter owns context limits. `bucket` chooses power-of-two dimensions within
+caller caps; overflow raises without truncation. Candidate groups stay on one
+request/device and replay seeds bind update, record, field, and candidate IDs.
+
+The caller injects a weighting function over labeled field kinds. It runs once
+for the complete logical update before physical slicing; batching only assigns
+its returned weights to the first row of each field. Missing labels and further
+candidate rows carry zero weight. Objective mathematics stays in `objectives`.
+Inference packing explicitly permits an unsupervised request.
+
+`stream.EpochStream` owns bounded chunk compilation, partial final updates,
+global cursor and epoch recovery, and deadlines. Callers provide the ordered
+per-epoch reader, record compiler, and pack function. Both training examples use
+it while retaining their own Arrow or NumPy shuffle policy. Independent tests
+verify exact replay and an unrelated schema consumer with different padding,
+vocabulary, context length, and loss weights.

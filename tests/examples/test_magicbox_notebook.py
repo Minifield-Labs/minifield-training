@@ -2,7 +2,9 @@
 
 from collections.abc import Callable
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -13,9 +15,12 @@ import pytest
 def _cells() -> list[str]:
     path = (
         Path(__file__).resolve().parents[2]
-        / "examples/magicbox/notebook_template.json"
+        / "examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb"
     )
-    return [cell["source"] for cell in json.loads(path.read_text())["cells"]]
+    return [
+        "".join(cell["source"])
+        for cell in json.loads(path.read_text())["cells"]
+    ]
 
 
 def _execute(source: str, namespace: dict[str, Any]) -> None:
@@ -217,3 +222,152 @@ def test_dataset_pin_and_local_override(
             "f074bb549f16ea091fd8ece12e79652b8082871f",
             str(data),
         )
+
+
+def _git(directory: Path, *arguments: str) -> str:
+    """Run only synthetic repositories under the test's isolated Git config."""
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.fixture(name="local_source")
+def isolated_git_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Isolate Git configuration, identity, and hooks for local-only clones."""
+    for name in tuple(os.environ):
+        if name.startswith("GIT_"):
+            monkeypatch.delenv(name)
+    hooks = tmp_path / "empty-hooks"
+    hooks.mkdir()
+    for name, value in {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_VALUE_0": str(hooks),
+        "GIT_AUTHOR_NAME": "Notebook fixture",
+        "GIT_AUTHOR_EMAIL": "notebook@example.invalid",
+        "GIT_COMMITTER_NAME": "Notebook fixture",
+        "GIT_COMMITTER_EMAIL": "notebook@example.invalid",
+    }.items():
+        monkeypatch.setenv(name, value)
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "--initial-branch=main")
+    return source
+
+
+def _publish(source: Path, content: str) -> str:
+    """Publish distinct trainer bytes without executing model code."""
+    trainer = source / "examples/magicbox/train.py"
+    trainer.parent.mkdir(parents=True, exist_ok=True)
+    trainer.write_text(content, encoding="utf-8")
+    _git(source, "add", "examples/magicbox/train.py")
+    _git(source, "commit", "-m", "test: publish synthetic trainer")
+    return _git(source, "rev-parse", "HEAD")
+
+
+def _checkout_settings(
+    tmp_path: Path, local_source: Path, revision: str
+) -> dict[str, Any]:
+    namespace = _settings(tmp_path, "smoke")
+    namespace.update(
+        SOURCE_REPO_URL=local_source.as_uri(), SOURCE_REVISION=revision
+    )
+    return namespace
+
+
+def test_checkout_uses_exact_pin_and_reruns_without_changing_it(
+    tmp_path: Path, local_source: Path
+) -> None:
+    """A newer default branch never changes the selected detached revision."""
+    revision = _publish(local_source, "pinned trainer\n")
+    newest = _publish(local_source, "newer default branch\n")
+    namespace = _checkout_settings(tmp_path, local_source, revision)
+    legacy = namespace["SCRATCH"] / "training"
+    legacy.mkdir()
+    preserved = legacy / "existing.txt"
+    preserved.write_text("previous extracted source", encoding="utf-8")
+    for _ in range(2):
+        _execute(_cells()[2], namespace)
+        checkout = namespace["CHECKOUT"]
+        assert _git(checkout, "rev-parse", "HEAD") == revision
+        assert _git(checkout, "rev-parse", "origin/main") == newest
+        assert _git(checkout, "rev-parse", "--abbrev-ref", "HEAD") == "HEAD"
+        assert _git(checkout, "status", "--porcelain") == ""
+        assert (checkout / "examples/magicbox/train.py").read_text(
+            encoding="utf-8"
+        ) == "pinned trainer\n"
+        assert (
+            preserved.read_text(encoding="utf-8") == "previous extracted source"
+        )
+
+
+def test_existing_checkout_fetches_a_newly_published_exact_pin(
+    tmp_path: Path, local_source: Path
+) -> None:
+    """An existing clone fetches an absent commit from the configured source."""
+    initial = _publish(local_source, "initial trainer\n")
+    namespace = _checkout_settings(tmp_path, local_source, initial)
+    _execute(_cells()[2], namespace)
+    checkout = namespace["CHECKOUT"]
+    published = _publish(local_source, "published after clone\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        _git(checkout, "cat-file", "-e", f"{published}^{{commit}}")
+    namespace["SOURCE_REVISION"] = published
+    _execute(_cells()[2], namespace)
+    assert _git(checkout, "rev-parse", "HEAD") == published
+    assert (checkout / "examples/magicbox/train.py").read_text(
+        encoding="utf-8"
+    ) == "published after clone\n"
+    assert _git(checkout, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("change", ("tracked", "staged", "untracked"))
+def test_checkout_refuses_to_overwrite_local_changes(
+    tmp_path: Path, local_source: Path, change: str
+) -> None:
+    """Refusing a revision switch preserves edited bytes and index state."""
+    initial = _publish(local_source, "initial trainer\n")
+    namespace = _checkout_settings(tmp_path, local_source, initial)
+    _execute(_cells()[2], namespace)
+    checkout = namespace["CHECKOUT"]
+    modified = checkout / (
+        "local-note.txt"
+        if change == "untracked"
+        else "examples/magicbox/train.py"
+    )
+    modified.write_text("local changes\n", encoding="utf-8")
+    if change == "staged":
+        _git(checkout, "add", str(modified))
+    status = _git(checkout, "status", "--porcelain")
+    namespace["SOURCE_REVISION"] = _publish(
+        local_source, "replacement trainer\n"
+    )
+    with pytest.raises(RuntimeError, match="Checkout contains local changes"):
+        _execute(_cells()[2], namespace)
+    assert modified.read_text(encoding="utf-8") == "local changes\n"
+    assert _git(checkout, "rev-parse", "HEAD") == initial
+    assert _git(checkout, "status", "--porcelain") == status
+
+
+def test_checkout_refuses_an_existing_non_git_directory(
+    tmp_path: Path, local_source: Path
+) -> None:
+    """An occupied checkout path is preserved rather than replaced by clone."""
+    revision = _publish(local_source, "initial trainer\n")
+    namespace = _checkout_settings(tmp_path, local_source, revision)
+    checkout = namespace["CHECKOUT"]
+    checkout.mkdir()
+    preserved = checkout / "existing.txt"
+    preserved.write_text("keep existing files", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Expected a clean checkout path"):
+        _execute(_cells()[2], namespace)
+    assert preserved.read_text(encoding="utf-8") == "keep existing files"
+    assert not (checkout / ".git").exists()

@@ -11,19 +11,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from minifield_training.batching import magicbox as batching
+from examples.magicbox import composition as magicbox
+from examples.magicbox import data
+from minifield_training.batching import schema_fields as batching
 from minifield_training.checkpoints import training_state
-from minifield_training.datasets import magicbox as data
+from minifield_training.datasets import fields
 from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.lfm2_5 import model as lfm
 from minifield_training.models.magicbox import model
-from minifield_training.objectives import magicbox as objective
+from minifield_training.objectives import schema_fields as objective
 from minifield_training.optimizers import adamw
-from minifield_training.strategies import magicbox
+from minifield_training.strategies import schema_fields as strategy
 
 
-def toy_encode(text: str) -> data.Encoding:
+def toy_encode(text: str) -> fields.Encoding:
     """Use deterministic whitespace tokens for offline structural checks."""
     spans = [
         (match.start(), match.end()) for match in re.finditer(r"\S+|\s+", text)
@@ -36,12 +38,12 @@ def toy_encode(text: str) -> data.Encoding:
         % 126
         for start, end in spans
     ]
-    return data.Encoding(
+    return fields.Encoding(
         (1, *ids), ((0, 0), *spans), (True, *((False,) * len(ids)))
     )
 
 
-def fixture() -> data.Record:
+def fixture() -> fields.Record:
     """Cover a span, categorical choice, boolean probability, and rubric."""
     return data.compile_record(
         "tiny",
@@ -105,14 +107,22 @@ def run(steps: int = 80) -> dict[str, object]:
     cfg, fusion, params = tiny()
     record = fixture()
     packed = batching.build(
-        [record], batching.Shape(1, 1, 16, 64, 8), seed=17, update=0
+        [record],
+        batching.Shape(1, 1, 16, 64, 8, 128, 0),
+        seed=17,
+        update=0,
+        weighting=objective.balance_types,
     )
     batch = {
         key: jnp.asarray(value[0]) for key, value in packed.microbatches.items()
     }
     inventory = magicbox.inventory(cfg, fusion)
     optimizer = adamw.AdamWConfig(learning_rate=0.003, weight_decay=0)
-    update = magicbox.make_step(cfg, fusion, optimizer, bf16=False)
+    update = strategy.make_step(
+        magicbox.bind(cfg, fusion, training=True, bf16=False),
+        magicbox.inventory(cfg, fusion),
+        optimizer,
+    )
     current = adamw.initialize_state(params, inventory)
     before = objective.terms(
         magicbox.forward(params, cfg, fusion, batch, bf16=False), batch

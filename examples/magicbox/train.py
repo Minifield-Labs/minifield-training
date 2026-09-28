@@ -9,19 +9,22 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from examples.magicbox import evaluate
+from examples.magicbox import bundle as magicbox_bundle
+from examples.magicbox import composition as magicbox
+from examples.magicbox import data
 from examples.magicbox import source
-from minifield_training.batching import magicbox as batching
+from minifield_training.batching import schema_fields as batching
+from minifield_training.checkpoints import discovery
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
-from minifield_training.datasets import magicbox as data
 from minifield_training.engine import training_run
+from minifield_training.evaluation import schema_fields as evaluate
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.magicbox import model
+from minifield_training.objectives import schema_fields as objective
 from minifield_training.optimizers import adamw
-from minifield_training.strategies import magicbox
-from minifield_training.strategies import magicbox_bundle
 from minifield_training.strategies import pretrained
+from minifield_training.strategies import schema_fields as strategy
 
 
 def arguments() -> argparse.Namespace:
@@ -77,7 +80,7 @@ def main() -> None:
     if json_io.digest_file(config_path) != encoder.SOURCE.config_sha256:
         raise ValueError("Pretrained config changed")
     cfg = encoder.Adapter().parse_config(
-        data.object_map(json.loads(config_path.read_text()))
+        json_io.object_map(json.loads(config_path.read_text()))
     )
     fusion = model.Config(
         encoder_width=cfg.hidden_size, row_chunk=args.row_chunk
@@ -88,15 +91,29 @@ def main() -> None:
         args.source_tokens,
         args.schema_tokens,
         args.schema_rows,
+        cfg.vocab_size,
+        0,
     )
-    stream = source.Stream(corpus, shape, args.seed, args.epochs)
+    if (
+        max(shape.source_tokens, shape.schema_tokens)
+        > encoder.MAX_SEQUENCE_LENGTH
+    ):
+        raise ValueError("Requested tokens exceed the encoder context")
+    batches = batching.SchemaBatchStrategy(
+        shape, objective.balance_types, min_tokens=128, min_rows=4
+    )
+    stream = source.training_stream(corpus, batches, args.seed, args.epochs)
     inventory = magicbox.inventory(cfg, fusion)
     optimizer = adamw.AdamWConfig(learning_rate=args.learning_rate)
     identity = {
         "source": dataclasses.asdict(encoder.SOURCE),
         "encoder": dataclasses.asdict(cfg),
         "fusion": dataclasses.asdict(fusion),
-        "shape": dataclasses.asdict(shape),
+        "shape": {
+            key: value
+            for key, value in dataclasses.asdict(shape).items()
+            if key not in ("vocab_size", "pad_token_id")
+        },
         "seed": args.seed,
         "bf16": not args.fp32,
         "devices": args.devices,
@@ -105,16 +122,18 @@ def main() -> None:
     }
     source_id = hashlib.sha256(json_io.canonical(identity).encode()).hexdigest()
     checkpoints = args.output / "checkpoints"
-    resume = sorted(
-        path
-        for path in checkpoints.glob("step-*")
-        if (path / "manifest.json").is_file()
+    resume = discovery.latest_checkpoint(
+        checkpoints,
+        run_id=args.run_id,
+        data_sha256=corpus.identity,
+        source_id=source_id,
+        reject_mismatched=True,
     )
     if args.evaluate_only and not resume:
         raise ValueError("Evaluation requires a trained checkpoint")
     if resume:
         current, cursor = training_state.load(
-            resume[-1],
+            resume,
             inventory,
             optimizer_id=optimizer.implementation_identity,
             run_id=args.run_id,
@@ -146,7 +165,11 @@ def main() -> None:
         )
     )
     evaluator = evaluate.Evaluator(
-        corpus, cfg, fusion, shape, bf16=not args.fp32
+        corpus.records,
+        evaluate.Predictor(
+            magicbox.bind(cfg, fusion, bf16=not args.fp32), batches
+        ),
+        names=data.KINDS,
     )
     remaining = args.epochs * stream.updates_per_epoch - cursor.next_batch
     if args.max_steps is not None:
@@ -159,8 +182,11 @@ def main() -> None:
             max_steps=remaining,
             max_seconds=args.max_hours * 3600,
         )
-        update = magicbox.make_step(
-            cfg, fusion, optimizer, mesh=mesh, bf16=not args.fp32
+        update = strategy.make_step(
+            magicbox.bind(cfg, fusion, training=True, bf16=not args.fp32),
+            inventory,
+            optimizer,
+            mesh=mesh,
         )
         with (args.output / "progress.jsonl").open(
             "a", encoding="utf-8"

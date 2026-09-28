@@ -17,6 +17,8 @@ from minifield_training.layers import feed_forward
 from minifield_training.models import contracts
 from minifield_training.models.lfm2_5 import model
 
+MAX_SEQUENCE_LENGTH = 8192
+
 SOURCE = contracts.PretrainedSource(
     model_id="LiquidAI/LFM2.5-Encoder-350M",
     revision="b886781f7c6f10ca9b7096e21b83e30a073c2f39",
@@ -110,7 +112,11 @@ def encode(
     bf16: bool = True,
 ) -> jax.Array:
     """Encode complete tokens, rematerializing blocks during reverse mode."""
-    if ids.ndim != 2 or mask.shape != ids.shape or ids.shape[1] > 8192:
+    if (
+        ids.ndim != 2
+        or mask.shape != ids.shape
+        or ids.shape[1] > MAX_SEQUENCE_LENGTH
+    ):
         raise ValueError(
             "Encoder input shape or trained context limit violated"
         )

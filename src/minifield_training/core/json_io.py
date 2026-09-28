@@ -3,6 +3,16 @@
 import hashlib
 import json
 import pathlib
+from typing import cast
+
+
+def object_map(value: object) -> dict[str, object]:
+    """Admit a JSON object with string keys."""
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) for key in value
+    ):
+        raise ValueError("Expected a JSON object")
+    return cast(dict[str, object], value)
 
 
 def canonical(value: object) -> str:

@@ -125,3 +125,23 @@ Array math inside the wrong module can satisfy import checks. Reviews must also
 confirm that a strategy composes shared services, an optimizer accepts neutral
 state, and a new model reuses qualified kernel/layer contracts. Preserve distinct
 mathematics explicitly when their precision or masking semantics differ.
+
+## Task components and product adapters
+
+Shared batching, objectives, evaluation, and strategies are named for reusable
+tasks and accept explicit model/token policies. A product name in those owners
+is a boundary error. Model equations and parameter layouts belong to model
+families; product wire formats, prompt templates, release selection, and public
+response formatting belong to the consuming example or experiment.
+
+For schema-conditioned learning, `datasets.fields` owns neutral records,
+`batching.schema_fields` owns packing, `objectives.schema_fields` owns loss and
+field-weight normalization, and `evaluation` owns decoding and metric aggregation.
+`strategies.schema_fields` accepts a forward callable and parameter inventory.
+`batching.stream` owns cursor/chunk replay for both examples. Bundle persistence
+and checkpoint discovery have single owners in `checkpoints`; file integrity
+belongs to CPU-only `artifacts`.
+
+Independent consumers must test alternate token policies and model forwards.
+Import and clone gates are necessary checks, but they don't prove reusable
+ownership. See the [September 28 audit](schema-components-audit.md).

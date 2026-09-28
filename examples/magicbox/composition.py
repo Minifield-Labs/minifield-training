@@ -1,17 +1,15 @@
-"""Compose the bidirectional LFM backbone, MagicBox heads, and shared engine."""
+"""Bind the selected LFM encoder to the MagicBox model and parameter names."""
 
+from collections.abc import Callable
 import functools
 
 import jax
 
 from minifield_training.core import parameters as core_parameters
-from minifield_training.engine import step
 from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.lfm2_5 import model as lfm
 from minifield_training.models.magicbox import model
-from minifield_training.objectives import magicbox as objective
-from minifield_training.optimizers import adamw
 
 
 def inventory(
@@ -53,24 +51,18 @@ def forward(
     return model.forward(parameters, fusion, apply, batch, training=training)
 
 
-def make_step(
+def bind(
     cfg: lfm.Config,
     fusion: model.Config,
-    optimizer: adamw.AdamWConfig,
     *,
-    mesh: jax.sharding.Mesh | None = None,
+    training: bool = False,
     bf16: bool = True,
-) -> step.StreamingStep:
-    """Build logical loss reduction with optional eight-device sharding."""
+) -> Callable[[types.Parameters, types.DeviceBatch], types.DeviceBatch]:
+    """Supply the selected model as a neutral two-argument forward callback."""
 
-    def loss_terms(
+    def apply(
         params: types.Parameters, batch: types.DeviceBatch
-    ) -> tuple[jax.Array, jax.Array]:
-        """Differentiate both shared-encoder calls and all four typed heads."""
-        return objective.terms(
-            forward(params, cfg, fusion, batch, training=True, bf16=bf16), batch
-        )
+    ) -> types.DeviceBatch:
+        return forward(params, cfg, fusion, batch, training=training, bf16=bf16)
 
-    return step.make_streaming_step(
-        loss_terms, inventory(cfg, fusion), optimizer, mesh=mesh
-    )
+    return apply

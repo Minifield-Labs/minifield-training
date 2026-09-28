@@ -1,5 +1,9 @@
 """Partial-label losses with logical-update type-balanced field weights."""
 
+from collections import Counter
+from collections.abc import Sequence
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -32,7 +36,7 @@ def losses(outputs: types.DeviceBatch, batch: types.DeviceBatch) -> jax.Array:
         binary_loss(outputs["tokens"], batch["token_target"]) * selectable,
         axis=-1,
     ) / jnp.maximum(jnp.sum(selectable, axis=-1), 1)
-    # 0 extract, 1 choice, 2 noul, 3 score. Padding has zero weight.
+    # 0 extraction, 1 categorical, 2 binary, 3 ordinal. Padding has zero weight.
     return jnp.where(
         batch["kind"] == 0,
         presence + token,
@@ -51,3 +55,26 @@ def terms(
     """
     weights = batch["field_weight"].astype(jnp.float32)
     return jnp.sum(losses(outputs, batch) * weights), jnp.sum(weights)
+
+
+def balance_types(
+    kinds: Sequence[int],
+    *,
+    type_weights: tuple[float, float, float, float] = (1, 1, 1, 1),
+) -> tuple[float, ...]:
+    """Assign one mean per active task, then a weighted mean across tasks.
+
+    The batch compiler calls this once for all supervised fields in the logical
+    update, before splitting microbatches or devices. It skips unlabeled fields.
+    """
+    if len(type_weights) != 4 or any(
+        not math.isfinite(weight) or weight < 0 for weight in type_weights
+    ):
+        raise ValueError("Invalid type weights")
+    if any(kind not in range(4) for kind in kinds):
+        raise ValueError("Unsupported field kind")
+    counts = Counter(kinds)
+    mass = sum(type_weights[kind] for kind in counts)
+    if not mass:
+        return (0.0,) * len(kinds)
+    return tuple(type_weights[kind] / (counts[kind] * mass) for kind in kinds)
