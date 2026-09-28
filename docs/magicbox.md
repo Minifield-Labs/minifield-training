@@ -2,7 +2,7 @@
 
 The notebook is `examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb`. Setup clones
 `https://github.com/Minifield-Labs/minifield-training.git` and checks out commit
-`658d749528d85315f96b88ff6454bd74941f5907` before installing its locked dependencies.
+`588a9e278ed2592e342fe8e56446e005e4842841` before installing its locked dependencies.
 Select a single-host TPU runtime, enable internet, and run the cells. It detects
 the visible TPU devices and downloads the pinned dataset from Hugging Face.
 

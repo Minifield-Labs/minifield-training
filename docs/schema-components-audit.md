@@ -70,3 +70,10 @@ The tests ran on macOS with Python 3.12.11; all 513 passed in 168.63 seconds.
 examples.magicbox.parallel_smoke` passed with 8 simulated CPU devices and FP32.
 Maximum absolute gradient difference was `3.5762786865234375e-7`, loss was
 `0.8969940543174744`, and supervised mass was `1.0`.
+
+The final notebook pins published commit
+`588a9e278ed2592e342fe8e56446e005e4842841`. Its checkout cell cloned that revision
+from GitHub in a temporary directory, verified the shared modules, and reran with
+a clean worktree. All code cells compiled; 18 notebook tests passed again after
+the pin changed. Dependency installation and TPU training weren't run by this
+checkout check.
