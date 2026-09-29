@@ -5,7 +5,8 @@ for dataset admission, dependency setup, encoder download, startup checks,
 full training, and inference reload. Setup clones the training repository from
 GitHub and verifies `SOURCE_REVISION` before installing dependencies and running
 Python directly in the notebook kernel. Weight loading, optimizer initialization,
-gradient lowering, compilation, training, and evaluation have separate cells.
+training-step lowering, compilation, training, and evaluation have separate cells.
+Set `XLA_DUMP` to a directory to save text HLO for every compiled program.
 Host-memory samples print during compilation and persist under `diagnostics/`.
 The kernel must run Python 3.12 or 3.13; dependencies install into that kernel. Edit the notebook directly. When training source changes,
 publish its commit and update `SOURCE_REVISION` to that full commit SHA.

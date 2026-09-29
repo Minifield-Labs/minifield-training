@@ -132,27 +132,29 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
 
 
 def test_compile_is_a_separate_direct_stage(tmp_path: Path) -> None:
-    """Compilation acts on the same real gradient and batch the runner uses."""
+    """Compilation acts on the same state and first update the runner uses."""
     calls = []
-    parameters, batch = object(), object()
-    executable = object()
+    full_state, microbatches, active = object(), object(), object()
+    executable = SimpleNamespace(memory_analysis=lambda: "stats")
 
-    def compile_gradient() -> object:
+    def compile_step() -> object:
         calls.append("compile")
         return executable
 
     def lower(
-        actual_parameters: object, actual_batch: object
+        actual_state: object, actual_microbatches: object, actual_active: object
     ) -> SimpleNamespace:
-        assert actual_parameters is parameters and actual_batch is batch
+        assert actual_state is full_state
+        assert actual_microbatches is microbatches
+        assert actual_active is active
         calls.append("lower")
-        return SimpleNamespace(compile=compile_gradient)
+        return SimpleNamespace(compile=compile_step)
 
     namespace = dict(
         OUTPUT=tmp_path,
-        physical_batch=batch,
-        current={"params": parameters},
-        update=SimpleNamespace(gradient=SimpleNamespace(lower=lower)),
+        first_update=SimpleNamespace(microbatches=microbatches, active=active),
+        current=full_state,
+        update=SimpleNamespace(lower=lower),
         diagnostics=SimpleNamespace(
             monitor=lambda *_args: contextlib.nullcontext()
         ),
@@ -161,7 +163,7 @@ def test_compile_is_a_separate_direct_stage(tmp_path: Path) -> None:
     assert calls == ["lower"]
     _execute(_cells()[11], namespace)
     assert calls == ["lower", "compile"]
-    assert namespace["compiled_gradient"] is executable
+    assert namespace["compiled_step"] is executable
 
 
 def test_no_training_subprocess() -> None:
