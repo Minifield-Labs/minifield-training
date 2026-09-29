@@ -52,6 +52,13 @@ other logical steps retain the scanned JIT path.
 The donated optimizer consumes its input buffers, including on a rejected
 commit. Continue from the returned `CommitResult.state` in either case.
 
+Pass `strict_compiles=True` to `training_run.run` to fail on silent
+recompilation. Any XLA compile during an update after the invocation's first
+raises `RuntimeError` naming the compiled programs, so a changed batch shape,
+dtype, or placement can't quietly add minutes and host memory mid-run.
+Evaluation and checkpoint callbacks aren't checked. The listener uses JAX's
+public monitoring events and is registered once per process.
+
 The training runner reports the first update's wall time separately because
 it can include compilation. `warm_updates_per_second` divides later committed
 updates by their summed update-call time; it excludes batch construction,
