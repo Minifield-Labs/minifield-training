@@ -141,6 +141,9 @@ checks don't establish CUDA or TPU qualification.
 
 `bidirectional` adds XLA pad-masked GQA, centered grouped short convolution,
 affine LayerNorm with FP32 moments, and inverted dropout. Empty attention
-rows return zero. Analytical CPU tests cover integer/boolean masks, exact
+rows return zero. Optional packed `segment_ids` (0 for padding) confine
+attention and convolution taps to one segment, and inactive queries return
+zero. Analytical tests cover segment-local averages, boundary taps, and their
+gradients. Analytical CPU tests cover integer/boolean masks, exact
 convolution boundaries, and input gradients. TPU qualification runs in the
 MagicBox notebook's full-model startup cell.
