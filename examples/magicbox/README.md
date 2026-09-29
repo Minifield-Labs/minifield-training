@@ -35,7 +35,10 @@ longest joint question-and-text sequence and the most questions in any split
 before fixing the shape. `SCORE_WIDTH` spreads hard score labels over nearby
 levels. Both modes freeze the pretrained token embeddings. `train.py` accepts
 the same settings as `--sequence-tokens`, `--questions`, and `--score-width`,
-and `predict.py` loads v3 pointer bundles.
+and `predict.py` loads v3 pointer bundles. `OPTIMIZER = 'optax'` selects the
+optax commit; `'transactional'` restores the older checked commit.
+`KEEP_CHECKPOINTS = 2` bounds output to about 2 checkpoints of 4.3 GB each
+plus the bundle, and the final cell prints the output folder's size.
 
 Local offline optimization and checkpoint check:
 
