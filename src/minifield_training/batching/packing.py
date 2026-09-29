@@ -122,3 +122,99 @@ def gather_index(
         )
         mask[item] = valid
     return index, mask
+
+
+def plan_rows(
+    sizes: Sequence[Sequence[int]],
+    capacity: Sequence[int],
+    *,
+    open_limit: int = 64,
+    close_below: float = 0.05,
+) -> list[list[int]]:
+    """Group items into rows by online first-fit, keeping the given order.
+
+    ``sizes[i]`` and ``capacity`` share dimensions, such as tokens and
+    questions. Each item joins the first open row with room in every
+    dimension, or opens a new row. A row closes once any dimension's free
+    space falls below ``close_below`` of its capacity. Opening a row beyond
+    ``open_limit`` closes the fullest open row by the first dimension, which
+    bounds how far an item can land behind its position. Returns item indices
+    per row: closed rows in closing order, then still-open rows. The result
+    depends only on the inputs.
+    """
+    if open_limit < 1 or not 0 <= close_below < 1 or not capacity:
+        raise ValueError("Invalid open-row limit, threshold, or capacity")
+    rows: list[list[int]] = []
+    open_rows: list[tuple[list[int], list[int]]] = []
+    for index, size in enumerate(sizes):
+        if len(size) != len(capacity) or any(
+            not 0 <= need <= limit
+            for need, limit in zip(size, capacity, strict=True)
+        ):
+            raise ValueError(f"Item {index} can't fit an empty row")
+        position = next(
+            (
+                slot
+                for slot, (used, _) in enumerate(open_rows)
+                if all(
+                    have + need <= limit
+                    for have, need, limit in zip(
+                        used, size, capacity, strict=True
+                    )
+                )
+            ),
+            None,
+        )
+        if position is None:
+            if len(open_rows) == open_limit:
+                fullest = max(
+                    range(len(open_rows)),
+                    key=lambda slot: open_rows[slot][0][0],
+                )
+                rows.append(open_rows.pop(fullest)[1])
+            open_rows.append(([0] * len(capacity), []))
+            position = len(open_rows) - 1
+        used, members = open_rows[position]
+        members.append(index)
+        for dimension, need in enumerate(size):
+            used[dimension] += need
+        if any(
+            limit - have < close_below * limit
+            for have, limit in zip(used, capacity, strict=True)
+        ):
+            rows.append(open_rows.pop(position)[1])
+    rows.extend(members for _, members in open_rows)
+    return rows
+
+
+def plan_updates(
+    sizes: Sequence[Sequence[int]],
+    capacity: Sequence[int],
+    rows_per_update: int,
+    *,
+    seed: int,
+    open_limit: int = 64,
+    close_below: float = 0.05,
+) -> list[list[list[int]]]:
+    """Shuffle items by ``seed``, pack them into rows, and group the rows.
+
+    Returns updates, each a list of at most ``rows_per_update`` rows of
+    original item indices. Every item appears exactly once. Rows follow the
+    shuffled order instead of sorting by size, so updates stay mixed.
+    """
+    if rows_per_update < 1:
+        raise ValueError("Updates need at least one row")
+    order = np.random.default_rng(seed).permutation(len(sizes))
+    rows = [
+        [int(order[index]) for index in row]
+        for row in plan_rows(
+            [sizes[int(index)] for index in order],
+            capacity,
+            open_limit=open_limit,
+            close_below=close_below,
+        )
+    ]
+    return [
+        rows[start : start + rows_per_update]
+        for start in range(0, len(rows), rows_per_update)
+    ]
