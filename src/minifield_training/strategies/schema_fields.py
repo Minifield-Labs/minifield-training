@@ -22,12 +22,14 @@ def make_step(
     *,
     mesh: jax.sharding.Mesh | None = None,
     terms: Terms = objective.terms,
+    transaction: step.Transaction = adamw.make_transaction,
 ) -> step.JitStep:
     """Bind a task loss to a supplied training forward and inventory.
 
     ``terms(outputs, batch)`` returns summed loss and weight mass. The default
     is per-row schema-field supervision; ``objectives.pointer.terms`` binds
-    the joint pointer formulation.
+    the joint pointer formulation. ``transaction`` selects the optimizer
+    commit, such as ``optimizers.optax_adamw.make_transaction``.
     """
 
     def loss_terms(
@@ -35,4 +37,6 @@ def make_step(
     ) -> tuple[jax.Array, jax.Array]:
         return terms(forward(params, batch), batch)
 
-    return step.make_jit_step(loss_terms, inventory, optimizer, mesh=mesh)
+    return step.make_jit_step(
+        loss_terms, inventory, optimizer, mesh=mesh, transaction=transaction
+    )

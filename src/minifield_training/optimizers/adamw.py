@@ -367,7 +367,7 @@ def _stable_norm(values: types.Parameters) -> jax.Array:
     return cast(jax.Array, maximum * jnp.sqrt(squared))
 
 
-def _validate_transition_inputs(
+def validate_transition_inputs(
     active_loss: jax.Array, accumulation_valid: jax.Array
 ) -> None:
     """Check the scalar loss and accumulation flag without values."""
@@ -418,7 +418,7 @@ def make_transaction(
             _validate_tree_structure(full_state[group], specs, group)
         _validate_step_structure(full_state["step"])
         _validate_tree_structure(gradients, trainable, "gradient")
-        _validate_transition_inputs(active_loss, accumulation_valid)
+        validate_transition_inputs(active_loss, accumulation_valid)
 
         loss = active_loss.astype(jnp.float32)
         step = full_state["step"]
