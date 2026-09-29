@@ -97,3 +97,7 @@ and owns no checkpoint writer, tokenizer, dataset wire format, or release pin.
 The example binds its selected encoder and heads through this interface.
 Independent tests train an unrelated four-scalar model and compare analytical
 gradients across multiple microbatch partitions.
+
+`schema_fields.make_step(..., terms=...)` accepts another objective's
+`terms(outputs, batch)`. Passing `objectives.pointer.terms` binds the joint
+pointer formulation to the same single-program update.

@@ -10,6 +10,10 @@ from minifield_training.kernels import types
 from minifield_training.objectives import schema_fields as objective
 from minifield_training.optimizers import adamw
 
+type Terms = Callable[
+    [types.DeviceBatch, types.DeviceBatch], tuple[jax.Array, jax.Array]
+]
+
 
 def make_step(
     forward: Callable[[types.Parameters, types.DeviceBatch], types.DeviceBatch],
@@ -17,12 +21,18 @@ def make_step(
     optimizer: adamw.AdamWConfig,
     *,
     mesh: jax.sharding.Mesh | None = None,
+    terms: Terms = objective.terms,
 ) -> step.JitStep:
-    """Bind task loss to a supplied training forward and parameter inventory."""
+    """Bind a task loss to a supplied training forward and inventory.
+
+    ``terms(outputs, batch)`` returns summed loss and weight mass. The default
+    is per-row schema-field supervision; ``objectives.pointer.terms`` binds
+    the joint pointer formulation.
+    """
 
     def loss_terms(
         params: types.Parameters, batch: types.DeviceBatch
     ) -> tuple[jax.Array, jax.Array]:
-        return objective.terms(forward(params, batch), batch)
+        return terms(forward(params, batch), batch)
 
     return step.make_jit_step(loss_terms, inventory, optimizer, mesh=mesh)

@@ -185,6 +185,30 @@ def build(
         _write(
             arrays, divmod(index, shape.requests), record, shape, seed, update
         )
+    return weighted_update(
+        arrays,
+        weighting,
+        microbatches=shape.microbatches,
+        requests=shape.requests,
+        example_ids=tuple(record.id for record in records),
+        allow_unsupervised=allow_unsupervised,
+    )
+
+
+def weighted_update(
+    arrays: contracts.HostBatch,
+    weighting: Callable[[Sequence[int]], Sequence[float]],
+    *,
+    microbatches: int,
+    requests: int,
+    example_ids: tuple[str, ...],
+    allow_unsupervised: bool,
+) -> contracts.PhysicalUpdate:
+    """Weight labeled fields over the whole update and mark active slots.
+
+    ``arrays`` holds ``field_weight`` (1 for labeled fields) and ``kind``.
+    The caller's weighting runs once, before physical microbatch slicing.
+    """
     labeled = arrays["field_weight"].astype(bool)
     weights = np.asarray(
         weighting(arrays["kind"][labeled].tolist()), dtype=np.float32
@@ -201,12 +225,8 @@ def build(
     # Host arrays are accepted by the engine and transferred one microbatch
     # at a time; retaining the complete dataset on accelerators is unnecessary.
     batch: types.DeviceBatch = arrays  # type: ignore[assignment]
-    active = np.arange(shape.microbatches) < math.ceil(
-        len(records) / shape.requests
-    )
-    return contracts.PhysicalUpdate(
-        batch, active, tuple(record.id for record in records)
-    )
+    active = np.arange(microbatches) < math.ceil(len(example_ids) / requests)
+    return contracts.PhysicalUpdate(batch, active, example_ids)
 
 
 def bucket(

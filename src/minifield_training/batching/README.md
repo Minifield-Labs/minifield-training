@@ -113,3 +113,16 @@ per-epoch reader, record compiler, and pack function. Both training examples use
 it while retaining their own Arrow or NumPy shuffle policy. Independent tests
 verify exact replay and an unrelated schema consumer with different padding,
 vocabulary, context length, and loss weights.
+
+## Joint pointer batches
+
+`pointer.PointerBatchStrategy` lays each request out as one sequence: every
+question's query, then its options, then the source (`pointer.layout`). Shape
+`[M, R, sequence_tokens]` holds `input_ids` and `input_mask`; per question
+(`[M, R, questions]`) it holds `query_index`, `kind`, and `field_weight`; and
+`[M, R, questions, sequence_tokens]` holds `allowed`, `start_target`, and
+`end_target`. Option questions may point only at their option markers.
+Extraction may point at selectable source tokens or its "not stated" marker.
+Every shape is fixed, so the training step compiles once. Overflow raises.
+`schema_fields.weighted_update` applies the caller's type weighting for both
+schema and pointer batches.
