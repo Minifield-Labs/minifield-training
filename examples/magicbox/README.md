@@ -20,8 +20,8 @@ and inference export/reload. It
 detects all TPU devices on one host. `ROWS_PER_DEVICE = 4` sets the rows each
 device takes per update. Set `DEVICES = 1` to require a single device.
 
-On the larger runtime, set `RUN_MODE = 'full'`, which accumulates 4
-microbatches per update. Set `DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate output folders; full mode
+On the larger runtime, set `RUN_MODE = 'full'`, which trains 1 epoch and
+prints 3 fixed validation requests' answers at every checkpoint. Set `DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate output folders; full mode
 starts from pretrained weights. Exact optimizer resume requires the same device
 count, batch settings, and packing settings.
 

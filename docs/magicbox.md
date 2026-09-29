@@ -162,9 +162,10 @@ overflow fails admission without truncation.
 
 Set `RUN_MODE = 'full'` for these full-training defaults:
 
-- 3 epochs, frozen pretrained token embeddings; the encoder trunk and pointer projections train.
-- All visible TPU devices, 4 packed rows per device, 4 accumulated
-  microbatches. On 8 devices this is 128 rows per logical update.
+- 1 epoch, frozen pretrained token embeddings; the encoder trunk and pointer projections train.
+  Raise `EPOCHS` and rerun to resume into more epochs.
+- All visible TPU devices, 4 packed rows per device, 1 microbatch. On 8
+  devices this is 32 rows, about 115 requests, per logical update.
 - BF16 activations, FP32 losses, parameters, and optimizer state.
 - AdamW: learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
   weight decay 0.01 for matrices, gradient clipping 1.0.
@@ -172,8 +173,11 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
 - A fixed row length from the dataset's longest joint sequence and 32
   question slots per row; shorter rows are padded.
 - Checkpoint every 250 updates; keep 2 complete states after evaluation.
-- 256 seeded validation records at each checkpoint. After all epochs,
-  evaluate all available validation, calibration, test, and OOD records.
+- 256 seeded validation records at each checkpoint, plus gold and predicted
+  answers for 3 fixed validation requests (`SAMPLE_RECORDS`) in the progress
+  log. After all epochs, save the bundle, then evaluate 5,000 records from
+  each of validation, calibration, test, and OOD (`FINAL_RECORDS = 0`
+  evaluates all).
 - Each session runs up to 8 hours. Rerunning resumes the next unread update.
 
 The recipe uses a constant learning rate. There is no warmup, scheduler,
