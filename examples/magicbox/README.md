@@ -8,7 +8,10 @@ Python directly in the notebook kernel. Weight loading, optimizer initialization
 training-step lowering, compilation, training, and evaluation have separate cells.
 Set `XLA_DUMP` to a directory to save text HLO for every compiled program.
 Host-memory samples print during compilation and persist under `diagnostics/`.
-The kernel must run Python 3.12 or 3.13; dependencies install into that kernel. Edit the notebook directly. When training source changes,
+The kernel must run Python 3.12 or 3.13; dependencies install into that kernel.
+Packages the kernel imported before the first cell, such as Kaggle's preloaded
+NumPy, keep their versions when pip accepts them, so Run All needs no restart.
+Only an incompatible preloaded version is replaced, with one restart requested. Edit the notebook directly. When training source changes,
 publish its commit and update `SOURCE_REVISION` to that full commit SHA.
 
 The notebook defaults to `RUN_MODE = 'smoke'`: 10 updates of the full pretrained
