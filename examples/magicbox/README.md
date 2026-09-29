@@ -4,11 +4,14 @@ Open [the TPU notebook](../kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb)
 for dataset admission, dependency setup, encoder download, startup checks,
 full training, and inference reload. Setup clones the training repository from
 GitHub and verifies `SOURCE_REVISION` before installing dependencies and running
-the Python entrypoints. Edit the notebook directly. When training source changes,
+Python directly in the notebook kernel. Weight loading, optimizer initialization,
+gradient lowering, compilation, training, and evaluation have separate cells.
+Host-memory samples print during compilation and persist under `diagnostics/`.
+The kernel must run Python 3.12 or 3.13; dependencies install into that kernel. Edit the notebook directly. When training source changes,
 publish its commit and update `SOURCE_REVISION` to that full commit SHA.
 
 The notebook defaults to `RUN_MODE = 'smoke'`: 10 updates of the full pretrained
-model, checkpoint save/reload, 8-record validation, and inference export. It
+model, checkpoint saving, 8-record validation, and inference export/reload. It
 detects all TPU devices on one host. A single-device runtime uses 1 request,
 1 microbatch, and schema chunks of 1. Set `DEVICES = 1` to require that topology.
 

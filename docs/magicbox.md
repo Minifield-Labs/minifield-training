@@ -1,10 +1,15 @@
 # MagicBox architecture and training
 
 The notebook is `examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb`. Setup clones
-`https://github.com/Minifield-Labs/minifield-training.git` and checks out commit
-`588a9e278ed2592e342fe8e56446e005e4842841` before installing its locked dependencies.
+`https://github.com/Minifield-Labs/minifield-training.git` and checks out the full `SOURCE_REVISION` recorded in its settings cell before
+installing locked dependencies into the Python 3.12 or 3.13 notebook kernel.
 Select a single-host TPU runtime, enable internet, and run the cells. It detects
 the visible TPU devices and downloads the pinned dataset from Hugging Face.
+Training executes directly in the kernel. Separate cells expose weight loading,
+optimizer initialization, gradient lowering, compilation, training, validation,
+and export. The accelerator-free host-memory monitor prints periodic samples
+and flushes them to `OUTPUT/diagnostics/`. A kernel killed by the OS still has no
+Python traceback; the last active stage and flushed samples identify where it stopped.
 
 ## Architecture
 
@@ -224,3 +229,9 @@ admission and formatting, tokenizer pins, and encoder/head selection live in the
 example. Shared schema records, batching, weighting, evaluation, replay, artifact
 verification, and bundle I/O have task-level owners. See the
 [architecture audit and compatibility evidence](schema-components-audit.md).
+
+The scanned encoder still received SIGKILL in the user's subsequent TPU attempt.
+The direct-kernel notebook exposes the failure stages; it does not establish
+that the TPU compiler memory problem is resolved. Python 3.13 passed 11 selected
+CPU tests covering notebook syntax, tiny optimization, exact checkpoint resume,
+bundle reload, the schema-field strategy, and host-memory monitoring.

@@ -1,6 +1,6 @@
-"""Offline execution of notebook topology, bounds, and download wiring."""
+"""Offline execution of the direct-kernel notebook and pinned source setup."""
 
-from collections.abc import Callable
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -20,18 +20,19 @@ def _cells() -> list[str]:
     return [
         "".join(cell["source"])
         for cell in json.loads(path.read_text())["cells"]
+        if cell["cell_type"] == "code"
     ]
 
 
 def _execute(source: str, namespace: dict[str, Any]) -> None:
-    # The notebook runs only against temporary paths and injected external I/O.
+    # Execute notebook orchestration with injected synthetic boundaries.
     # pylint: disable-next=exec-used
     exec(compile(source, "magicbox-notebook-cell", "exec"), namespace)
 
 
 def _settings(tmp_path: Path, mode: str) -> dict[str, Any]:
     namespace: dict[str, Any] = {}
-    code = _cells()[1].replace(
+    code = _cells()[0].replace(
         "IS_KAGGLE = Path('/kaggle/working').is_dir()", "IS_KAGGLE = False"
     )
     code = code.replace("Path('/content')", f"Path({str(tmp_path)!r})")
@@ -40,188 +41,133 @@ def _settings(tmp_path: Path, mode: str) -> dict[str, Any]:
     return namespace
 
 
-def _runner(
-    namespace: dict[str, Any], devices: int, calls: list[tuple[str, ...]]
-) -> Callable[..., None]:
-    def run(*args: str, **_kwargs: object) -> None:
-        calls.append(args)
-        if "-c" in args and args[-1].endswith("hardware.json"):
-            Path(args[-1]).write_text(
-                json.dumps({"devices": devices}), encoding="utf-8"
-            )
-        if "examples.magicbox.train" in args:
-            output = Path(args[args.index("--output") + 1])
-            manifests = sorted(output.glob("checkpoints/step-*/manifest.json"))
-            previous = (
-                json.loads(manifests[-1].read_text())["cursor"]["next_batch"]
-                if manifests
-                else 0
-            )
-            additional = (
-                int(args[args.index("--max-steps") + 1])
-                if "--max-steps" in args
-                else 100
-            )
-            step = previous + additional
-            checkpoint = output / "checkpoints" / f"step-{step:08d}"
-            checkpoint.mkdir(parents=True)
-            (checkpoint / "manifest.json").write_text(
-                json.dumps({"cursor": {"next_batch": step}})
-            )
-
-    namespace["run_child"] = run
-    return run
-
-
-@pytest.mark.parametrize("devices", (1, 8))
-@pytest.mark.parametrize("mode", ("smoke", "full"))
-def test_detected_topology_and_bounded_resume(
-    tmp_path: Path, devices: int, mode: str
-) -> None:
-    """Scale global requests and keep repeated smoke invocations bounded."""
-    namespace = _settings(tmp_path, mode)
-    calls: list[tuple[str, ...]] = []
-    _runner(namespace, devices, calls)
-    _execute(_cells()[3], namespace)
-    assert namespace["DEVICES"] == devices
-    assert namespace["REQUESTS"] == devices
-    assert namespace["OUTPUT"].name == f"magicbox-{mode}-{devices}dev"
-    namespace.update(
-        DATASET=tmp_path / "data", SOURCE_TOKENS=1024, SCHEMA_TOKENS=512
-    )
-    _execute(_cells()[7], namespace)
-    _execute(_cells()[9], namespace)
-    commands = [cmd for cmd in calls if "examples.magicbox.train" in cmd]
-    assert len(commands) == 2
-    startup, continuation = commands
-    assert startup[startup.index("--max-steps") + 1] == "2"
-    for command in commands:
-        assert command[command.index("--devices") + 1] == str(devices)
-        assert command[command.index("--requests") + 1] == str(devices)
-        assert command[command.index("--source-tokens") + 1] == "1024"
-        assert command[command.index("--schema-tokens") + 1] == "512"
-        for option in ("--microbatches", "--row-chunk"):
-            assert command[command.index(option) + 1] == (
-                "1" if mode == "smoke" else "4"
-            )
-    if mode == "smoke":
-        assert continuation[continuation.index("--max-steps") + 1] == "8"
-        assert namespace["committed_updates"]() == 10
-    else:
-        assert "--max-steps" not in continuation
-        assert continuation[continuation.index("--final-records") + 1] == "0"
-    _execute(_cells()[7], namespace)
-    _execute(_cells()[9], namespace)
-    assert len([cmd for cmd in calls if "examples.magicbox.train" in cmd]) == (
-        2 if mode == "smoke" else 3
-    )
-
-
-def test_one_update_smoke_and_explicit_topology_guard(tmp_path: Path) -> None:
-    """Respect a smaller smoke cap and reject mismatched device requests."""
-    namespace = _settings(tmp_path, "smoke")
-    calls: list[tuple[str, ...]] = []
-    _runner(namespace, 1, calls)
-    namespace["DEVICES"] = 8
-    with pytest.raises(ValueError, match="runtime exposes 1"):
-        _execute(_cells()[3], namespace)
-    namespace["DEVICES"] = 1
-    _execute(_cells()[3], namespace)
-    namespace.update(
-        DATASET=tmp_path / "data",
-        SOURCE_TOKENS=1024,
-        SCHEMA_TOKENS=512,
-        SMOKE_STEPS=1,
-    )
-    _execute(_cells()[7], namespace)
-    _execute(_cells()[9], namespace)
-    assert namespace["committed_updates"]() == 1
-    assert len([cmd for cmd in calls if "examples.magicbox.train" in cmd]) == 1
-
-
 @pytest.mark.parametrize(
-    ("count", "local_count", "hosts", "platform", "valid"),
+    ("count", "local", "hosts", "platform", "valid"),
     (
         (1, 1, 1, "tpu", True),
         (8, 8, 1, "tpu", True),
         (8, 4, 2, "tpu", False),
-        (8, 4, 1, "tpu", False),
         (1, 1, 1, "cpu", False),
     ),
 )
-def test_probe_requires_local_tpus(
+def test_direct_hardware_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     count: int,
-    local_count: int,
+    local: int,
     hosts: int,
     platform: str,
     valid: bool,
 ) -> None:
-    """Execute the child probe against synthetic JAX hardware discovery."""
+    """Probe actual kernel imports and reject unsupported topology."""
     namespace = _settings(tmp_path, "smoke")
-    _runner(namespace, count, [])
-    _execute(_cells()[3], namespace)
-    fake_jax = SimpleNamespace(
-        __version__="0.7.2",
-        devices=lambda: [
-            SimpleNamespace(platform=platform, device_kind="synthetic")
-            for _ in range(count)
-        ],
-        process_count=lambda: hosts,
-        local_device_count=lambda: local_count,
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        SimpleNamespace(
+            __version__="0.7.2",
+            devices=lambda: [
+                SimpleNamespace(platform=platform, device_kind="test")
+            ]
+            * count,
+            process_count=lambda: hosts,
+            local_device_count=lambda: local,
+        ),
     )
-    monkeypatch.setitem(sys.modules, "jax", fake_jax)
-    destination = tmp_path / "probe.json"
-    monkeypatch.setattr(sys, "argv", ["probe", str(destination)])
     if valid:
-        _execute(namespace["probe"], {})
-        assert json.loads(destination.read_text())["devices"] == count
+        _execute(_cells()[3], namespace)
+        assert namespace["REQUESTS"] == count
+        assert namespace["DEVICES"] == count
     else:
         with pytest.raises(RuntimeError):
-            _execute(namespace["probe"], {})
-        assert not destination.exists()
+            _execute(_cells()[3], namespace)
 
 
-@pytest.mark.parametrize("local_dataset", (False, True))
-def test_dataset_pin_and_local_override(
-    tmp_path: Path, local_dataset: bool
-) -> None:
-    """Fetch the immutable processed dataset or honor a local directory."""
-    namespace = _settings(tmp_path, "smoke")
-    calls: list[tuple[str, ...]] = []
-    run = _runner(namespace, 1, calls)
-    _execute(_cells()[3], namespace)
-    data = (
-        tmp_path / "attached"
-        if local_dataset
-        else namespace["SCRATCH"] / "dataset"
-    )
-    data.mkdir()
-    (data / "manifest.json").write_text(
-        json.dumps(
-            {
-                "format": "minifield.magicbox/1.0",
-                "complete": True,
-                "mode": "full",
-                "tokenizer": {"source_limit": 1024, "schema_limit": 512},
-                "shards": [{"split": "train", "rows": 446751}],
-            }
+@pytest.mark.parametrize("mode", ("smoke", "full"))
+def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
+    """Direct training cells preserve resume offsets and update limits."""
+    namespace = _settings(tmp_path, mode)
+    calls: list[SimpleNamespace] = []
+
+    def run(
+        *_args: object, **kwargs: Any
+    ) -> tuple[dict[str, object], SimpleNamespace]:
+        config = _args[4]
+        assert isinstance(config, SimpleNamespace)
+        calls.append(config)
+        return {}, SimpleNamespace(
+            next_batch=kwargs["cursor"].next_batch + config.max_steps
         )
+
+    namespace.update(
+        OUTPUT=tmp_path,
+        current={},
+        update=object(),
+        inventory=object(),
+        stream=SimpleNamespace(updates_per_epoch=100),
+        cursor=SimpleNamespace(next_batch=0),
+        checkpoints=tmp_path,
+        optimizer=SimpleNamespace(implementation_identity="test"),
+        evaluator=SimpleNamespace(callback=lambda *_args: None),
+        diagnostics=SimpleNamespace(
+            monitor=lambda *_args: contextlib.nullcontext()
+        ),
+        training_run=SimpleNamespace(
+            run=run,
+            RunConfig=lambda *args, **kwargs: SimpleNamespace(
+                args=args, **kwargs
+            ),
+        ),
     )
-    if local_dataset:
-        namespace["DATASET"] = data
-    calls.clear()
-    namespace["run_child"] = run
-    _execute(_cells()[5], namespace)
-    assert namespace["DATASET"] == data
-    assert len(calls) == (1 if local_dataset else 2)
-    if not local_dataset:
-        assert calls[0][-3:] == (
-            "protodotdesign/magicbox-v1",
-            "f074bb549f16ea091fd8ece12e79652b8082871f",
-            str(data),
-        )
+    _execute(_cells()[12], namespace)
+    _execute(_cells()[14], namespace)
+    assert [call.max_steps for call in calls] == (
+        [2, 8] if mode == "smoke" else [2, 298]
+    )
+    _execute(_cells()[12], namespace)
+    _execute(_cells()[14], namespace)
+    assert len(calls) == 2
+
+
+def test_compile_is_a_separate_direct_stage(tmp_path: Path) -> None:
+    """Compilation acts on the same real gradient and batch the runner uses."""
+    calls = []
+    parameters, batch = object(), object()
+    executable = object()
+
+    def compile_gradient() -> object:
+        calls.append("compile")
+        return executable
+
+    def lower(
+        actual_parameters: object, actual_batch: object
+    ) -> SimpleNamespace:
+        assert actual_parameters is parameters and actual_batch is batch
+        calls.append("lower")
+        return SimpleNamespace(compile=compile_gradient)
+
+    namespace = dict(
+        OUTPUT=tmp_path,
+        physical_batch=batch,
+        current={"params": parameters},
+        update=SimpleNamespace(gradient=SimpleNamespace(lower=lower)),
+        diagnostics=SimpleNamespace(
+            monitor=lambda *_args: contextlib.nullcontext()
+        ),
+    )
+    _execute(_cells()[10], namespace)
+    assert calls == ["lower"]
+    _execute(_cells()[11], namespace)
+    assert calls == ["lower", "compile"]
+    assert namespace["compiled_gradient"] is executable
+
+
+def test_no_training_subprocess() -> None:
+    """Only Git and package installation may create subprocesses."""
+    for cell in _cells()[3:]:
+        assert "subprocess" not in cell
+        assert "run_child" not in cell
+        assert "examples.magicbox.train" not in cell
 
 
 def _git(directory: Path, *arguments: str) -> str:
@@ -295,7 +241,7 @@ def test_checkout_uses_exact_pin_and_reruns_without_changing_it(
     preserved = legacy / "existing.txt"
     preserved.write_text("previous extracted source", encoding="utf-8")
     for _ in range(2):
-        _execute(_cells()[2], namespace)
+        _execute(_cells()[1], namespace)
         checkout = namespace["CHECKOUT"]
         assert _git(checkout, "rev-parse", "HEAD") == revision
         assert _git(checkout, "rev-parse", "origin/main") == newest
@@ -315,13 +261,13 @@ def test_existing_checkout_fetches_a_newly_published_exact_pin(
     """An existing clone fetches an absent commit from the configured source."""
     initial = _publish(local_source, "initial trainer\n")
     namespace = _checkout_settings(tmp_path, local_source, initial)
-    _execute(_cells()[2], namespace)
+    _execute(_cells()[1], namespace)
     checkout = namespace["CHECKOUT"]
     published = _publish(local_source, "published after clone\n")
     with pytest.raises(subprocess.CalledProcessError):
         _git(checkout, "cat-file", "-e", f"{published}^{{commit}}")
     namespace["SOURCE_REVISION"] = published
-    _execute(_cells()[2], namespace)
+    _execute(_cells()[1], namespace)
     assert _git(checkout, "rev-parse", "HEAD") == published
     assert (checkout / "examples/magicbox/train.py").read_text(
         encoding="utf-8"
@@ -336,7 +282,7 @@ def test_checkout_refuses_to_overwrite_local_changes(
     """Refusing a revision switch preserves edited bytes and index state."""
     initial = _publish(local_source, "initial trainer\n")
     namespace = _checkout_settings(tmp_path, local_source, initial)
-    _execute(_cells()[2], namespace)
+    _execute(_cells()[1], namespace)
     checkout = namespace["CHECKOUT"]
     modified = checkout / (
         "local-note.txt"
@@ -351,7 +297,7 @@ def test_checkout_refuses_to_overwrite_local_changes(
         local_source, "replacement trainer\n"
     )
     with pytest.raises(RuntimeError, match="Checkout contains local changes"):
-        _execute(_cells()[2], namespace)
+        _execute(_cells()[1], namespace)
     assert modified.read_text(encoding="utf-8") == "local changes\n"
     assert _git(checkout, "rev-parse", "HEAD") == initial
     assert _git(checkout, "status", "--porcelain") == status
@@ -368,6 +314,6 @@ def test_checkout_refuses_an_existing_non_git_directory(
     preserved = checkout / "existing.txt"
     preserved.write_text("keep existing files", encoding="utf-8")
     with pytest.raises(RuntimeError, match="Expected a clean checkout path"):
-        _execute(_cells()[2], namespace)
+        _execute(_cells()[1], namespace)
     assert preserved.read_text(encoding="utf-8") == "keep existing files"
     assert not (checkout / ".git").exists()
