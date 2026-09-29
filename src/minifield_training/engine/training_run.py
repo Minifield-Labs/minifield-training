@@ -292,8 +292,11 @@ def run[RecordT](
                     ),
                 ):
                     result = compiled(current, batch.microbatches, batch.active)
+                # Reading the commit flag waits for the device, so the time
+                # covers execution, not just asynchronous dispatch.
+                committed_update = bool(result.committed)
                 update_seconds = _now() - update_started
-                if not bool(result.committed):
+                if not committed_update:
                     code = int(result.code)
                     raise RuntimeError(f"Training update rejected, code={code}")
                 current = result.state

@@ -180,7 +180,8 @@ def test_install_keeps_packages_the_kernel_already_imported(
         if "--output-file" in command:
             Path(command[command.index("--output-file") + 1]).write_text(
                 "numpy==2.2.6\n    # via jax\n"
-                "scipy==1.16.0 ; python_version >= '3.12'\n"
+                "scipy==1.16.0 ; python_version >= '3.12'\n",
+                encoding="utf-8",
             )
 
     def run(command: list[str]) -> SimpleNamespace:
