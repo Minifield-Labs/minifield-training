@@ -11,7 +11,18 @@ from minifield_training.kernels import linear
 from minifield_training.kernels import types
 from minifield_training.layers import schema_fusion
 
-type Encoder = Callable[[types.Parameters, jax.Array, jax.Array], jax.Array]
+# encode(params, ids, mask, segment_ids, positions); packed rows pass segment
+# IDs (0 for padding) and per-segment positions, unpacked rows pass None.
+type Encoder = Callable[
+    [
+        types.Parameters,
+        jax.Array,
+        jax.Array,
+        jax.Array | None,
+        jax.Array | None,
+    ],
+    jax.Array,
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,6 +117,25 @@ def project(hidden: jax.Array, params: types.Parameters) -> jax.Array:
     )
 
 
+def encode_schema(
+    parameters: types.Parameters, encode: Encoder, batch: types.DeviceBatch
+) -> jax.Array:
+    """Encode the packed schema rows of every request in one encoder call.
+
+    Returns ``[requests * packed_sequences, schema_tokens, encoder_width]``.
+    """
+    ids = batch["packed_schema_ids"]
+    length = ids.shape[-1]
+    segments = batch["packed_schema_segments"].reshape(-1, length)
+    return encode(
+        parameters,
+        ids.reshape(-1, length),
+        (segments != 0).astype(jnp.int32),
+        segments,
+        batch["packed_schema_positions"].reshape(-1, length),
+    )
+
+
 def forward(
     parameters: types.Parameters,
     cfg: Config,
@@ -115,52 +145,66 @@ def forward(
     training: bool = False,
     schema_hidden: jax.Array | None = None,
 ) -> types.DeviceBatch:
-    """Encode sources once and map independent rows in bounded chunks.
+    """Encode sources once, schema rows packed, and fuse rows in chunks.
 
-    All arrays retain a leading request axis for device sharding. Inside the
-    row map source_owner is explicit; source tensors stay in the same graph.
-    Keys are attached to rows by the batch compiler for exact replay.
+    All arrays retain a leading request axis for device sharding. Schema rows
+    are encoded packed, then gathered back to ``[rows, schema_tokens]`` views
+    for fusion. Inside the row map source_owner is explicit; source tensors
+    stay in the same graph. Keys are attached to rows by the batch compiler
+    for exact replay.
     """
     if training and schema_hidden is not None:
         raise ValueError("Detached schema caches cannot enter training")
-    source_ids, schema_ids = batch["source_ids"], batch["schema_ids"]
+    source_ids, packed = batch["source_ids"], batch["packed_schema_ids"]
+    requests, rows, width = batch["schema_mask"].shape
     if (
         source_ids.ndim != 2
-        or schema_ids.ndim != 3
-        or source_ids.shape[0] != schema_ids.shape[0]
+        or packed.ndim != 3
+        or source_ids.shape[0] != requests
+        or packed.shape[0] != requests
         or batch["source_mask"].shape != source_ids.shape
-        or batch["schema_mask"].shape != schema_ids.shape
-        or batch["row_seed"].shape != schema_ids.shape[:2]
-        or min(*source_ids.shape, *schema_ids.shape) < 1
+        or batch["packed_schema_segments"].shape != packed.shape
+        or batch["packed_schema_positions"].shape != packed.shape
+        or batch["schema_token_index"].shape != batch["schema_mask"].shape
+        or batch["row_seed"].shape != (requests, rows)
+        or min(*source_ids.shape, *packed.shape, rows, width) < 1
     ):
         raise ValueError("Inconsistent source/schema ownership or masks")
     if schema_hidden is not None and schema_hidden.shape != (
-        schema_ids.shape[0] * schema_ids.shape[1],
-        schema_ids.shape[2],
+        packed.shape[0] * packed.shape[1],
+        packed.shape[2],
         cfg.encoder_width,
     ):
         raise ValueError("Cached schema tensor shape mismatch")
     params = types.slice_parameters(parameters, "magicbox.")
-    source = encode(parameters, batch["source_ids"], batch["source_mask"])
+    source = encode(
+        parameters, batch["source_ids"], batch["source_mask"], None, None
+    )
     memory = schema_fusion.norm(project(source, params), params, "source_norm")
     matched = linear.full_linear(memory, params["span_source"])
-    requests, rows, length = batch["schema_ids"].shape
+    encoded = (
+        encode_schema(parameters, encode, batch)
+        if schema_hidden is None
+        else schema_hidden
+    )
+    flat = project(encoded, params).reshape(
+        requests, packed.shape[1] * packed.shape[2], -1
+    )
+    gathered = jax.vmap(lambda values, index: values[index])(
+        flat, batch["schema_token_index"]
+    )
+    masks = batch["schema_mask"].reshape(-1, width)
+    hidden_rows = gathered.reshape(requests * rows, width, -1) * masks[
+        ..., None
+    ].astype(gathered.dtype)
     owners = jnp.repeat(jnp.arange(requests), rows)
-    ids = batch["schema_ids"].reshape(-1, length)
-    masks = batch["schema_mask"].reshape(-1, length)
     seeds = batch["row_seed"].reshape(-1)
 
     def row_forward(
         inputs: tuple[jax.Array, ...],
     ) -> tuple[jax.Array, jax.Array]:
         """Keep complete token sequences through every interaction block."""
-        row_ids, row_mask, owner, seed, row_index = inputs
-        encoded = (
-            encode(parameters, row_ids[None], row_mask[None])[0]
-            if schema_hidden is None
-            else schema_hidden[row_index]
-        )
-        hidden = project(encoded, params)
+        hidden, row_mask, owner, seed = inputs
         for index in range(cfg.layers):
             hidden = schema_fusion.block(
                 hidden,
@@ -188,7 +232,7 @@ def forward(
     readouts, token_logits = jax.lax.map(
         # JAX 0.7.2 exports checkpoint without a public typing declaration.
         jax.checkpoint(row_forward),  # type: ignore[attr-defined]
-        (ids, masks, owners, seeds, jnp.arange(requests * rows)),
+        (hidden_rows, masks, owners, seeds),
         batch_size=cfg.row_chunk,
     )
     result = {

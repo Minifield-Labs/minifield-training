@@ -39,6 +39,8 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--source-tokens", type=int, default=1024)
     parser.add_argument("--schema-tokens", type=int, default=512)
     parser.add_argument("--schema-rows", type=int, default=256)
+    # Packed encoder rows per request; omitted means measure every split.
+    parser.add_argument("--schema-sequences", type=int)
     parser.add_argument("--row-chunk", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max-steps", type=int)
@@ -85,6 +87,14 @@ def main() -> None:
     fusion = model.Config(
         encoder_width=cfg.hidden_size, row_chunk=args.row_chunk
     )
+    sequences = (
+        corpus.packed_sequences(
+            sorted({str(shard["split"]) for shard in corpus.shards}),
+            args.schema_tokens,
+        )
+        if args.schema_sequences is None
+        else args.schema_sequences
+    )
     shape = batching.Shape(
         args.microbatches,
         args.requests,
@@ -93,6 +103,7 @@ def main() -> None:
         args.schema_rows,
         cfg.vocab_size,
         0,
+        schema_sequences=sequences,
     )
     if (
         max(shape.source_tokens, shape.schema_tokens)
@@ -118,7 +129,7 @@ def main() -> None:
         "bf16": not args.fp32,
         "devices": args.devices,
         "contract": data.FORMAT,
-        "batching": "fixed-shape/1",
+        "batching": "fixed-shape-packed-schema/1",
         "implementation": "magicbox-jax/2-frozen-token-embeddings",
     }
     source_id = hashlib.sha256(json_io.canonical(identity).encode()).hexdigest()

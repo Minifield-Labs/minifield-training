@@ -50,7 +50,7 @@ to admit v1 bundles using their original inventory.
 | Area | Working Polyomino recipe | MagicBox recipe / finding |
 | --- | --- | --- |
 | Backbone | LFM2.5 Base, causal | LFM2.5 Encoder 350M, bidirectional; intentionally different architecture |
-| Encoder work | 1 encoding per decision row | 1 source encoding per request plus 1 encoding per schema row, then fusion |
+| Encoder work | 1 encoding per decision row | 1 source encoding per request plus 1 packed encoding of all schema rows, then fusion per row |
 | Physical batch | 16 decisions across 8 devices | 8 requests across 8 devices; request work varies with schema rows |
 | Accumulation | 4 microbatches | 4 full-run microbatches; smoke uses 1; accumulation is scanned inside one compiled update |
 | Sequence shapes | Fixed 512 tokens | Fixed source 1,024, schema 512, rows 256; former recipe allowed up to 84 gradient shapes |

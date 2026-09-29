@@ -56,6 +56,21 @@ def schema_rows(
     return ("",), (prefix,)
 
 
+def labeled_schema_rows(request: object, targets: object) -> tuple[str, ...]:
+    """Return the schema row text training encodes, in field order.
+
+    Training keeps only labeled questions, so unlabeled ones add no rows.
+    """
+    questions = json_io.object_map(json_io.object_map(request).get("questions"))
+    gold = json_io.object_map(targets)
+    return tuple(
+        text
+        for key, raw in questions.items()
+        if key in gold
+        for text in schema_rows(json_io.object_map(raw))[1]
+    )
+
+
 def _targets(
     kind: int,
     candidates: tuple[str, ...],

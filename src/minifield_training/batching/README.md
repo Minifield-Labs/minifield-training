@@ -51,8 +51,28 @@ runner uses that count to resume without assuming dense packing.
 `BatchSource` supplies a replayable stream from a global update cursor and an
 optional absolute deadline. The shared runner consumes either interface.
 
-Sequence packing isn't implemented. Concatenating records needs segment-aware
-attention and an objective that preserves supervision boundaries.
+`packing.pack(sequences, rows, length, pad_token_id=...)` places whole token
+sequences into fixed `[rows, length]` arrays by first-fit decreasing; equal
+lengths keep input order. It returns token IDs, segment IDs (0 for padding,
+`index + 1` for input sequence `index`), positions that restart at 0 in each
+sequence, and every sequence's placement. Empty, overlong, and over-capacity
+inputs raise instead of truncating. `packing.rows_required(lengths, length)`
+counts the rows `pack` would fill. `packing.gather_index(placements,
+row_length, width)` maps each sequence back to a `[sequences, width]` view of
+the flattened rows, with a mask for columns past its length.
+
+```python
+from minifield_training.batching import packing
+
+packed = packing.pack([[1, 5, 6], [1, 7], [1, 8, 9, 4]], 2, 5, pad_token_id=0)
+index, mask = packing.gather_index(packed.placements, 5, 4)
+rows = packed.input_ids.reshape(-1)[index] * mask
+# [[1, 5, 6, 0], [1, 7, 0, 0], [1, 8, 9, 4]]
+```
+
+Packed consumers need segment-aware kernels: `kernels.bidirectional` for
+encoders and the packed causal kernels for decoders. Schema batches pack their
+encoder inputs; dense record batches still pad one record per row.
 
 ## Schema-conditioned batches
 
@@ -70,6 +90,16 @@ count then stay constant across batches; masks and field weights make padding
 inert. MagicBox training selects this policy. The default bucketed behavior
 remains available for other consumers. Candidate groups stay on one
 request/device and replay seeds bind update, record, field, and candidate IDs.
+
+Schema batches also carry packed encoder inputs. `Shape.schema_sequences`
+sets how many `schema_tokens`-long encoder rows hold one request's schema rows.
+The default, one encoder row per schema row, always fits. Arrays
+`packed_schema_ids`, `packed_schema_segments`, and `packed_schema_positions`
+have shape `[M, R, sequences, schema_tokens]`. `schema_token_index`, shaped like
+`schema_mask`, gathers each schema row from the flattened packed axis. The
+row-layout arrays stay unchanged for row-level consumers. A request that
+doesn't fit raises at packing time. Bucketing picks a power-of-two sequence
+count within the configured cap.
 
 The caller injects a weighting function over labeled field kinds. It runs once
 for the complete logical update before physical slicing; batching only assigns
