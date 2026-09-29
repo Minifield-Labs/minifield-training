@@ -7,7 +7,7 @@ name = "minifield-training"
 version = "0.1.0"
 description = "Minifield Python/JAX training worker."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = []
 
 [project.optional-dependencies]

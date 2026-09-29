@@ -5,7 +5,8 @@ with executable quality gates.
 
 ## Start here
 
-Use Python 3.12 and uv 0.11.30. From this repository:
+Use Python 3.12 and uv 0.11.30 for development. The training package also admits
+Python 3.13 notebook kernels. From this repository:
 
 ```sh
 uv sync --locked
