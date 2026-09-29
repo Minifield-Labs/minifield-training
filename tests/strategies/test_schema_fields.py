@@ -232,3 +232,56 @@ def test_per_row_losses_match_independent_closed_form() -> None:
     )
     assert float(physical["field_weight"][1, 0]) == 0.125
     assert not np.any(physical["field_weight"][2])
+
+
+def test_fixed_shape_reuses_gradient_trace_with_correct_padding() -> None:
+    """Length, row-count, and partial-batch changes reuse one gradient graph."""
+    traces = []
+
+    def forward(
+        params: types.Parameters, batch: types.DeviceBatch
+    ) -> types.DeviceBatch:
+        traces.append(batch["schema_ids"].shape)
+        return _forward(params, batch)
+
+    batches = batching.SchemaBatchStrategy(
+        batching.Shape(1, 3, 16, 8, 16, 11, 10),
+        objective.balance_types,
+        fixed_shape=True,
+    )
+    update = schema_fields.make_step(
+        forward, _inventory(), adamw.AdamWConfig(0.1)
+    )
+    binary = _records()[1]
+    longer = dataclasses.replace(
+        binary,
+        text="abcdef",
+        source=fields.Encoding(
+            (7, 1, 2, 3, 4, 5, 6),
+            ((0, 0),) + tuple((i, i + 1) for i in range(6)),
+            (True,) + (False,) * 6,
+        ),
+        fields=(
+            dataclasses.replace(binary.fields[0], rows=((8, 3, 4, 5, 6),)),
+        ),
+    )
+    for index, records in enumerate((_records(), [longer], [binary])):
+        packed = batches.pack(records, seed=9, update=index)
+        physical = {key: value[0] for key, value in packed.microbatches.items()}
+        loss, mass, gradients = update.gradient(_zeros(), physical)
+        expected_loss = _INITIAL_LOSS if index == 0 else math.log(2)
+        expected_gradients = (
+            _GRADIENTS
+            if index == 0
+            else {
+                "category": 0.0,
+                "binary": -0.5,
+                "presence": 0.0,
+                "token": 0.0,
+            }
+        )
+        assert float(loss) == pytest.approx(expected_loss, abs=2e-7)
+        assert float(mass) == pytest.approx(1, abs=1e-7)
+        for name, expected in expected_gradients.items():
+            assert float(gradients[name]) == pytest.approx(expected, abs=1e-7)
+    assert traces == [(3, 16, 8)]

@@ -103,7 +103,10 @@ def _zeros(
     }
 
 
-def test_uneven_counts_partial_labels_and_soft_targets(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fixed_shape", (False, True))
+def test_uneven_counts_partial_labels_and_soft_targets(
+    tmp_path: Path, fixed_shape: bool
+) -> None:
     """Aggregate per-field observations before averaging active task losses."""
     first = _record()
     second = dataclasses.replace(
@@ -115,7 +118,9 @@ def test_uneven_counts_partial_labels_and_soft_targets(tmp_path: Path) -> None:
     predictor = evaluation.Predictor(
         _zeros,
         batching.SchemaBatchStrategy(
-            batching.Shape(4, 8, 8, 8, 16, 11, 10), objective.balance_types
+            batching.Shape(4, 8, 8, 8, 16, 11, 10),
+            objective.balance_types,
+            fixed_shape=fixed_shape,
         ),
     )
     evaluator = evaluation.Evaluator(

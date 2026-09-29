@@ -33,6 +33,13 @@ deduplication.
    affected Polyomino. Pretrained admission and checkpoint serialization are
    separate boundaries that still read full tensors.
 
+4. **Per-update buckets changed the gradient shape.** The old packer selected
+   source length, schema length, and row count separately, allowing up to 84
+   variants. The CLI and notebook now select the shared strategy's fixed-shape
+   mode: source 1,024, schema 512, and 256 rows per request. Partial updates keep
+   the same dimensions. Padding carries zero mask/weight, and overflows fail
+   explicitly. Training identities now also bind `batching=fixed-shape/1`.
+
 Training identity changes to `magicbox-jax/2-frozen-token-embeddings`, so old
 all-trainable optimizer checkpoints cannot silently resume under the new
 recipe. Inference exports use `minifield.magicbox.model/2`; the loader continues
@@ -46,7 +53,7 @@ to admit v1 bundles using their original inventory.
 | Encoder work | 1 encoding per decision row | 1 source encoding per request plus 1 encoding per schema row, then fusion |
 | Physical batch | 16 decisions across 8 devices | 8 requests across 8 devices; request work varies with schema rows |
 | Accumulation | 4 microbatches | 4 full-run microbatches; smoke uses 1; both use the same streaming update |
-| Sequence shapes | Fixed 512 tokens | Source 128/256/512/1024, schema 128/256/512, rows 4/8/16/32/64/128/256: up to 84 gradient shapes |
+| Sequence shapes | Fixed 512 tokens | Fixed source 1,024, schema 512, rows 256; former recipe allowed up to 84 gradient shapes |
 | Precision | BF16 computation, FP32 masters, gradients, moments | Same; fusion norms and objective reductions use FP32 where required |
 | Rematerialization | Encoder blocks checkpointed | Encoder scan body and schema rows checkpointed; extra schema work remains |
 | Attention | Dense causal attention | Dense bidirectional attention through JAX's XLA implementation; CPU oracle tests cover its outputs and gradients |
@@ -67,12 +74,13 @@ decision. The observed failed batch had 512 source tokens and 4 schema rows of
 256 tokens. Row chunk 1 limits concurrent schema work but still processes all
 4 rows and differentiates their shared encoder use.
 
-Power-of-two bucketing avoids padding every request to 256 rows, but it also
-creates additional compilations and retained executables. A successful first
-gradient compile covers only that shape. The 10-update smoke doesn't establish
-capacity for every dataset bucket or the full-run row chunk. No arbitrary
-truncation, removed supervision, or global cache-clearing policy was introduced
-as a speculative fix.
+The previous power-of-two bucketing created additional compilations and
+retained executables. Training now uses the configured maximum dimensions on
+every update, trading padded work for one gradient shape within a recipe.
+Evaluation inherits fixed token/row dimensions with its own single-request
+forward graph. Tests change source length, schema length, candidate counts,
+and batch occupancy while proving one gradient trace and analytical loss and
+gradient equivalence. The batching policy is part of checkpoint identity.
 
 ## Failure trace and evidence
 
@@ -119,3 +127,8 @@ storage by 268,435,464 bytes (including tuple metadata). CPU temporary-buffer
 estimates remained about 5.20GB in both cases, with compilation near 6.6 seconds.
 These results don't support claiming that embedding freezing alone resolves
 compiler host memory.
+
+The revised maximum-shape gradient (source 1,024, 256 schema rows × 512 tokens,
+row chunk 1, frozen embeddings) compiled on CPU in 8.55 seconds. Its compiler
+host peak was 0.505GiB and temporary-buffer estimate was 5,327,148,504 bytes.
+This checks full-shape lowering/compilation locally, not TPU execution.

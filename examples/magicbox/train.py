@@ -100,7 +100,7 @@ def main() -> None:
     ):
         raise ValueError("Requested tokens exceed the encoder context")
     batches = batching.SchemaBatchStrategy(
-        shape, objective.balance_types, min_tokens=128, min_rows=4
+        shape, objective.balance_types, fixed_shape=True
     )
     stream = source.training_stream(corpus, batches, args.seed, args.epochs)
     inventory = magicbox.inventory(cfg, fusion)
@@ -118,6 +118,7 @@ def main() -> None:
         "bf16": not args.fp32,
         "devices": args.devices,
         "contract": data.FORMAT,
+        "batching": "fixed-shape/1",
         "implementation": "magicbox-jax/2-frozen-token-embeddings",
     }
     source_id = hashlib.sha256(json_io.canonical(identity).encode()).hexdigest()

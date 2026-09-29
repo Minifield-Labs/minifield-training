@@ -233,6 +233,69 @@ def test_strategy_satisfies_shared_contract_and_replays_partial_update() -> (
         np.testing.assert_array_equal(array, updates[1].microbatches[name])
 
 
+def test_fixed_shape_preserves_axes_through_partial_update_and_resume() -> None:
+    """Record lengths and candidate counts cannot select new array shapes."""
+    shape = schema_fields.Shape(2, 2, 17, 9, 9, 11, 10)
+    strategy = schema_fields.SchemaBatchStrategy(
+        shape, _uniform, fixed_shape=True
+    )
+    records = [_record("0")] + [_binary_record(str(i)) for i in range(1, 5)]
+    records[1] = dataclasses.replace(
+        records[1],
+        text="abcdef",
+        source=fields.Encoding(
+            (7, 1, 2, 3, 4, 5, 6),
+            ((0, 0),) + tuple((i, i + 1) for i in range(6)),
+            (True,) + (False,) * 6,
+        ),
+        fields=(
+            dataclasses.replace(
+                records[1].fields[0], rows=((8, 1, 2, 3, 4, 5),)
+            ),
+        ),
+    )
+    updates = list(strategy.iter_updates(records, seed=5, shuffle=False))
+    assert [item.example_ids for item in updates] == [
+        ("0", "1", "2", "3"),
+        ("4",),
+    ]
+    signatures = [
+        {
+            name: (value.shape, value.dtype)
+            for name, value in item.microbatches.items()
+        }
+        for item in updates
+    ]
+    assert signatures[0] == signatures[1]
+    last = updates[1]
+    assert last.microbatches["source_ids"].shape == (2, 2, 17)
+    assert last.microbatches["schema_ids"].shape == (2, 2, 9, 9)
+    assert last.microbatches["token_target"].shape == (2, 2, 9, 17)
+    assert last.active.tolist() == [True, False]
+    assert np.sum(last.microbatches["row_mask"]) == 1
+    assert np.sum(last.microbatches["field_weight"]) == 1
+    resumed = next(
+        strategy.iter_updates(records, seed=5, shuffle=False, start_update=1)
+    )
+    for name, array in last.microbatches.items():
+        np.testing.assert_array_equal(resumed.microbatches[name], array)
+
+
+@pytest.mark.parametrize(
+    "axis", ("source_tokens", "schema_tokens", "schema_rows")
+)
+def test_fixed_shape_rejects_overflow_without_truncation(axis: str) -> None:
+    """The fixed envelope fails explicitly when any record axis exceeds it."""
+    shape = dataclasses.replace(
+        schema_fields.Shape(1, 1, 8, 8, 8, 11, 10), **{axis: 1}
+    )
+    strategy = schema_fields.SchemaBatchStrategy(
+        shape, _uniform, fixed_shape=True
+    )
+    with pytest.raises(ValueError, match="exceeds configured batch shape"):
+        strategy.pack([_record()], seed=0, update=0)
+
+
 @pytest.mark.parametrize("weights", ((), (-1.0,), (float("nan"),)))
 def test_invalid_weighting_results_fail_before_training(
     weights: tuple[float, ...],

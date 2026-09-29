@@ -63,7 +63,12 @@ capacity, allowing dense and multi-sequence layouts to share the interface.
 
 `schema_fields.Shape` requires explicit vocabulary and pad token IDs. The model
 adapter owns context limits. `bucket` chooses power-of-two dimensions within
-caller caps; overflow raises without truncation. Candidate groups stay on one
+caller caps; overflow raises without truncation. Set `fixed_shape=True` on
+`SchemaBatchStrategy` to bypass bucketing and pad every update to `shape`,
+including partial final updates. Source tokens, schema tokens, and schema row
+count then stay constant across batches; masks and field weights make padding
+inert. MagicBox training selects this policy. The default bucketed behavior
+remains available for other consumers. Candidate groups stay on one
 request/device and replay seeds bind update, record, field, and candidate IDs.
 
 The caller injects a weighting function over labeled field kinds. It runs once

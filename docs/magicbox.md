@@ -84,7 +84,10 @@ reloads the exported bundle in the notebook kernel.
 requires exactly that many devices on the same host. This supports a Colab
 v5e-1 smoke run and an 8-device full run without changing model architecture.
 Requests per microbatch are `DEVICES * REQUESTS_PER_DEVICE`, with a default
-of 1 request per device. Both modes retain source and schema token limits.
+of 1 request per device. Both modes use fixed training dimensions: 1,024 source tokens, 512 schema
+tokens, and 256 schema rows per request. Padding retains these shapes for every
+update, including the final partial batch. Explicit overflow fails admission
+without truncation.
 
 Set `RUN_MODE = 'full'` for these full-training defaults:
 
@@ -95,8 +98,8 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
 - AdamW: learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
   weight decay 0.01 for matrices, gradient clipping 1.0.
 - Gradient checkpointing for encoder and schema-row computation.
-- Schema processing in chunks of 4. Power-of-two buckets for source length,
-  schema length, and row count; default operational maximum 256 rows.
+- Schema processing in chunks of 4. Fixed source length 1,024, schema length
+  512, and schema row count 256; shorter observations are padded.
 - Checkpoint every 250 updates; keep 2 complete states after evaluation.
 - 256 seeded validation records at each checkpoint. After all epochs,
   evaluate all available validation, calibration, test, and OOD records.
@@ -119,7 +122,8 @@ Missing labels contribute zero. An entirely unsupervised training batch raises
 Checkpoints contain parameters, Adam moments, update count, immutable source
 and dataset identities, and the next data cursor. Shuffle and dropout keys
 derive from that cursor and the seed. Changing batch topology, precision,
-encoder, architecture, seed, optimizer settings, or dataset prevents resume.
+encoder, architecture, seed, optimizer settings, dataset, or fixed-shape
+batching policy prevents resume.
 Epoch bounds and session time can increase without resetting the run.
 
 Default output directories include mode and device count, for example

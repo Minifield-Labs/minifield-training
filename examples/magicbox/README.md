@@ -20,12 +20,15 @@ On the larger runtime, set `RUN_MODE = 'full'`. With 8 devices, its defaults
 are 8 requests per microbatch, 4 microbatches, and schema chunks of 4. Set
 `DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate
 output folders; full mode starts from pretrained weights. Exact optimizer
-resume requires the same device count and batch settings.
+resume requires the same device count, batch settings, and fixed-shape policy.
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
 `f074bb549f16ea091fd8ece12e79652b8082871f`. Set `DATASET` to a completed local
 directory to use an attached dataset. Both modes keep the dataset's full
-source/schema token limits and freeze the pretrained token embeddings while
+fixed training dimensions: 1,024 source tokens, 512 schema tokens, and 256
+schema rows per request. Records and final partial batches are padded to these
+limits; the gradient input shape stays constant. Both modes freeze the
+pretrained token embeddings while
 training the remaining 289,282,052 parameters.
 
 Local offline optimization and checkpoint check:

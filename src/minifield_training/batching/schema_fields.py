@@ -89,7 +89,7 @@ def _write(
             for ids in field.rows
         )
     ):
-        raise ValueError(f"Record {record.id} exceeds configured batch bucket")
+        raise ValueError(f"Record {record.id} exceeds configured batch shape")
     arrays["source_ids"][*slot, :length] = record.source.ids
     arrays["source_mask"][*slot, :length] = 1
     arrays["selectable"][*slot, :length] = record.source.selectable
@@ -219,6 +219,7 @@ class SchemaBatchStrategy:
     weighting: Callable[[Sequence[int]], Sequence[float]]
     min_tokens: int = 1
     min_rows: int = 1
+    fixed_shape: bool = False
 
     def update_count(self, examples: Sequence[fields.Record]) -> int:
         """Count complete and padded updates independently of record order."""
@@ -232,10 +233,12 @@ class SchemaBatchStrategy:
         update: int,
         allow_unsupervised: bool = False,
     ) -> contracts.PhysicalUpdate:
-        """Bucket and pack a complete logical update with stable replay keys."""
+        """Pack a complete update with fixed or bucketed observation axes."""
         return build(
             examples,
-            bucket(
+            self.shape
+            if self.fixed_shape
+            else bucket(
                 examples,
                 self.shape,
                 min_tokens=self.min_tokens,
