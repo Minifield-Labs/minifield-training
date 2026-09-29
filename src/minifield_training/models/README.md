@@ -59,9 +59,11 @@ source memory through 2 pre-norm fusion blocks. Defaults are width 256,
 4 heads, FFN multiplier 2, dropout 0.1, and extraction match width 128.
 One scalar candidate head serves both choice and score. Separate binary and
 presence heads and token-membership logits complete the four output types.
-Schema rows are encoded packed: `model.encode_schema` runs the encoder once
-over every request's packed rows, and the forward gathers each row back with
-`schema_token_index` before fusion. The encoder callable takes
+Schema rows are encoded packed: `model.encode_schema` encodes every request's
+packed sequences, `row_chunk` at a time, so `row_chunk` still bounds schema
+encoder concurrency. Each fusion row gathers its tokens from the packed
+projection inside the chunked row map, so the padded `[rows, schema_tokens]`
+view never exists for all rows at once. The encoder callable takes
 `(params, ids, mask, segment_ids, positions)`; source encoding passes `None`
 for both. Fusion rows run in chunks without detaching either encoder path.
 

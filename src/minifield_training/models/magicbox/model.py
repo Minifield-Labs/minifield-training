@@ -3,6 +3,7 @@
 from collections.abc import Callable
 import dataclasses
 import math
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -118,22 +119,33 @@ def project(hidden: jax.Array, params: types.Parameters) -> jax.Array:
 
 
 def encode_schema(
-    parameters: types.Parameters, encode: Encoder, batch: types.DeviceBatch
+    parameters: types.Parameters,
+    encode: Encoder,
+    batch: types.DeviceBatch,
+    chunk: int | None = None,
 ) -> jax.Array:
-    """Encode the packed schema rows of every request in one encoder call.
+    """Encode every request's packed schema rows, ``chunk`` at a time.
 
     Returns ``[requests * packed_sequences, schema_tokens, encoder_width]``.
+    ``chunk`` bounds how many packed sequences the encoder holds at once;
+    ``None`` encodes them all in one call.
     """
-    ids = batch["packed_schema_ids"]
-    length = ids.shape[-1]
+    length = batch["packed_schema_ids"].shape[-1]
     segments = batch["packed_schema_segments"].reshape(-1, length)
-    return encode(
-        parameters,
-        ids.reshape(-1, length),
+    inputs = (
+        batch["packed_schema_ids"].reshape(-1, length),
         (segments != 0).astype(jnp.int32),
         segments,
         batch["packed_schema_positions"].reshape(-1, length),
     )
+    if chunk is None:
+        return encode(parameters, *inputs)
+
+    def one(item: tuple[jax.Array, ...]) -> jax.Array:
+        ids, mask, segment, position = (value[None] for value in item)
+        return encode(parameters, ids, mask, segment, position)[0]
+
+    return cast(jax.Array, jax.lax.map(one, inputs, batch_size=chunk))
 
 
 def forward(
@@ -183,20 +195,17 @@ def forward(
     memory = schema_fusion.norm(project(source, params), params, "source_norm")
     matched = linear.full_linear(memory, params["span_source"])
     encoded = (
-        encode_schema(parameters, encode, batch)
+        encode_schema(parameters, encode, batch, cfg.row_chunk)
         if schema_hidden is None
         else schema_hidden
     )
+    # Rows gather from the packed projection inside the chunked map, so the
+    # padded [rows, schema_tokens] view never exists for all rows at once.
     flat = project(encoded, params).reshape(
         requests, packed.shape[1] * packed.shape[2], -1
     )
-    gathered = jax.vmap(lambda values, index: values[index])(
-        flat, batch["schema_token_index"]
-    )
+    indices = batch["schema_token_index"].reshape(-1, width)
     masks = batch["schema_mask"].reshape(-1, width)
-    hidden_rows = gathered.reshape(requests * rows, width, -1) * masks[
-        ..., None
-    ].astype(gathered.dtype)
     owners = jnp.repeat(jnp.arange(requests), rows)
     seeds = batch["row_seed"].reshape(-1)
 
@@ -204,7 +213,8 @@ def forward(
         inputs: tuple[jax.Array, ...],
     ) -> tuple[jax.Array, jax.Array]:
         """Keep complete token sequences through every interaction block."""
-        hidden, row_mask, owner, seed = inputs
+        token_index, row_mask, owner, seed = inputs
+        hidden = flat[owner][token_index] * row_mask[:, None].astype(flat.dtype)
         for index in range(cfg.layers):
             hidden = schema_fusion.block(
                 hidden,
@@ -232,7 +242,7 @@ def forward(
     readouts, token_logits = jax.lax.map(
         # JAX 0.7.2 exports checkpoint without a public typing declaration.
         jax.checkpoint(row_forward),  # type: ignore[attr-defined]
-        (hidden_rows, masks, owners, seeds),
+        (indices, masks, owners, seeds),
         batch_size=cfg.row_chunk,
     )
     result = {

@@ -237,21 +237,24 @@ def bucket(
         maximum.schema_tokens,
         min_tokens,
     )
-    sequences = (
-        None
-        if maximum.schema_sequences is None
-        else axis(
-            max(
-                packing.rows_required(
-                    [len(row) for field in record.fields for row in field.rows],
-                    schema_tokens,
-                )
-                for record in records
-            ),
-            maximum.schema_sequences,
-            1,
-        )
-    )
+    sequences = None
+    if maximum.schema_sequences is not None:
+        lengths = [
+            [len(row) for field in record.fields for row in field.rows]
+            for record in records
+        ]
+
+        def required(tokens: int) -> int:
+            return max(packing.rows_required(row, tokens) for row in lengths)
+
+        # Row length and packed sequence count trade off: widen packed rows
+        # until the request fits the sequence cap, within the token cap.
+        while (
+            required(schema_tokens) > maximum.schema_sequences
+            and schema_tokens < maximum.schema_tokens
+        ):
+            schema_tokens = min(maximum.schema_tokens, schema_tokens * 2)
+        sequences = axis(required(schema_tokens), maximum.schema_sequences, 1)
     return dataclasses.replace(
         maximum,
         source_tokens=axis(
