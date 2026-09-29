@@ -185,6 +185,38 @@ Its source SHA-256 is
 The small committed inventory fixture came from the checkpoint's HTTP range
 header; no model weights or generated training records are committed.
 
+### Compiler memory investigation
+
+The September 29 single-TPU attempt was killed during XLA compilation after
+reaching 44.72 GiB of host RAM on a 47 GiB host. Its first physical batch had
+1 request, 4 schema rows, 512 source tokens, and 256 schema tokens. Lowering
+compiler effort produced the same failure before the first optimizer update.
+The exact TPU compiler pass responsible hasn't been identified.
+
+The encoder now scans its layers, retaining one block body per operator kind
+instead of expanding every layer into the compiled program. Weight selection
+preserves the configured order and distinct convolution/attention tensors.
+The model equations, FP32 master inventory, row checkpointing, and attention
+implementation are unchanged.
+
+A CPU abstract compile of the full 356,390,916-parameter gradient at the failed
+batch shape, using JAX 0.7.2 and row chunk 1, measured:
+
+| Measurement | Unrolled encoder | Scanned encoder |
+| --- | ---: | ---: |
+| Lowered HLO text | 2.30 MB | 1.20 MB |
+| Lowering plus compilation | 30.86 s | 7.23 s |
+| Process peak host RAM | 1.00 GiB | 0.58 GiB |
+| Compiled temporary buffer estimate | 3.95 GB | 5.20 GB |
+
+This reduces the local compiler workload at the cost of extra packed-weight
+buffers. It hasn't yet been qualified on TPU. The CPU measurements don't
+establish TPU peak memory or throughput. Repeated/interleaved operator tests
+compare every master gradient and output with the prior unrolled schedule;
+their BF16 comparisons enforce declared rounding in both graphs by disabling
+CPU excess precision. The existing default-compiler masking, shared-gradient,
+row-chunking, and tiny training checks also remain required.
+
 ## Reusable ownership
 
 The model family retains the architecture and parameter names. Product wire

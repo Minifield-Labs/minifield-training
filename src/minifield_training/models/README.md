@@ -43,7 +43,11 @@ output heads, norms, and depthwise taps aren't candidates.
 `b886781f7c6f10ca9b7096e21b83e30a073c2f39`. Its adapter admits the 148 FP32
 `lfm2.*` tensors, totaling 354,483,968 parameters. It composes centered
 short convolutions, bidirectional pad-masked GQA, QK RMSNorm, RoPE, and the
-family's SwiGLU blocks. Every block rematerializes in reverse mode. It doesn't
+family's SwiGLU blocks. A layer scan compiles one block per operator kind,
+selecting each layer's original weights in order. Common tensors and each
+operator's distinct tensors are stacked separately without dummy weights.
+Every block rematerializes in reverse mode. Flat FP32 masters, checkpoint
+names, and optimizer state retain their existing format. It doesn't
 construct or load an unused vocabulary head. `encoder.MAX_SEQUENCE_LENGTH`
 owns its admitted 8,192-token limit independently of the source RoPE metadata.
 
@@ -64,4 +68,8 @@ that argument. Fusion-only updates don't invalidate pre-projection caches.
 
 CPU checks cover published tensor shapes, noncausal behavior, FP32/BF16
 padding, shared gradients, permutation, 2/3/17/65 candidates, row chunking,
-and cache rejection. See [the training guide](../../../docs/magicbox.md).
+and cache rejection. Repeated and interleaved operator layouts also compare
+outputs and every master gradient with the former unrolled schedule in FP32
+and BF16. That comparison disables CPU excess precision to enforce the
+declared BF16 rounding in both graphs. See
+[the training guide](../../../docs/magicbox.md).

@@ -1,7 +1,6 @@
 """Pinned LFM2.5 encoder: bidirectional attention and centered short conv."""
 
-from collections.abc import Mapping
-import functools
+from collections.abc import Callable, Mapping
 
 import jax
 import jax.numpy as jnp
@@ -103,6 +102,87 @@ def _block(
     )
 
 
+def _scan_blocks(
+    hidden: jax.Array,
+    mask: jax.Array,
+    params: Mapping[str, jax.Array],
+    cfg: model.Config,
+) -> jax.Array:
+    """Keep one compiled block per operator kind, with distinct layer weights.
+
+    Common tensors travel along the scan's layer axis. Operator-specific
+    tensors are stacked separately, so convolution and attention keep their
+    original shapes without padding or allocating dummy model parameters.
+    Packing is differentiable; checkpoint and optimizer inventories stay flat.
+    """
+    if not cfg.layer_types:
+        return hidden
+    layers = [
+        types.slice_parameters(params, f"lfm2.layers.{index}.")
+        for index in range(len(cfg.layer_types))
+    ]
+    common_names = set(layers[0]).intersection(*layers)
+    common = {
+        name: jnp.stack([layer[name] for layer in layers])
+        for name in sorted(common_names)
+    }
+    kinds = tuple(dict.fromkeys(cfg.layer_types))
+    operators = {}
+    for kind in kinds:
+        group = [
+            layer
+            for layer, layer_kind in zip(layers, cfg.layer_types, strict=True)
+            if layer_kind == kind
+        ]
+        operators[kind] = {
+            name: jnp.stack([layer[name] for layer in group])
+            for name in sorted(set(group[0]) - common_names)
+        }
+    counts = dict.fromkeys(kinds, 0)
+    offsets = []
+    for kind in cfg.layer_types:
+        offsets.append(counts[kind])
+        counts[kind] += 1
+    indices = jnp.asarray([kinds.index(kind) for kind in cfg.layer_types])
+
+    def step(
+        activation: jax.Array,
+        item: tuple[types.Parameters, jax.Array, jax.Array],
+    ) -> tuple[jax.Array, None]:
+        """Select the original operator and its weights at this layer."""
+        shared, index, offset = item
+
+        def branch(kind: str) -> Callable[[None], jax.Array]:
+            """Bind one operator's static layout to the dynamic layer slot."""
+
+            def apply(_: None) -> jax.Array:
+                """Apply the unchanged block equations to selected weights."""
+                selected = {
+                    name: values[offset]
+                    for name, values in operators[kind].items()
+                }
+                return _block(
+                    activation, mask, {**shared, **selected}, cfg=cfg, kind=kind
+                )
+
+            return apply
+
+        result = jax.lax.switch(
+            index, tuple(branch(kind) for kind in kinds), None
+        )
+        return result, None
+
+    # Scan separates forward/reverse iterations; it doesn't need CSE barriers.
+    # JAX 0.7.2 exports checkpoint without a public typing declaration.
+    rematerialize = jax.checkpoint  # type: ignore[attr-defined]
+    hidden, _ = jax.lax.scan(
+        rematerialize(step, prevent_cse=False),
+        hidden,
+        (common, indices, jnp.asarray(offsets)),
+    )
+    return hidden
+
+
 def encode(
     params: Mapping[str, jax.Array],
     cfg: model.Config,
@@ -122,12 +202,7 @@ def encode(
         )
     dtype = jnp.bfloat16 if bf16 else jnp.float32
     hidden = params["lfm2.embed_tokens.weight"][ids].astype(dtype)
-    for index, kind in enumerate(cfg.layer_types):
-        layer = types.slice_parameters(params, f"lfm2.layers.{index}.")
-        block = functools.partial(_block, cfg=cfg, kind=kind)
-        # JAX 0.7.2 exports checkpoint without a public typing declaration.
-        rematerialize = jax.checkpoint  # type: ignore[attr-defined]
-        hidden = rematerialize(block)(hidden, mask, layer)
+    hidden = _scan_blocks(hidden, mask, params, cfg)
     return (
         normalization.rms_norm(
             hidden, params["lfm2.embedding_norm.weight"], cfg.norm_eps
