@@ -12,6 +12,7 @@ import time
 import jax
 
 from minifield_training.batching import contracts as batching
+from minifield_training.checkpoints import discovery
 from minifield_training.checkpoints import training_state
 from minifield_training.core import parameters as core_parameters
 from minifield_training.engine import step
@@ -68,6 +69,8 @@ class RunConfig:
     report_every: int
     max_steps: int | None = None
     max_seconds: float | None = None
+    # Newest checkpoints kept under checkpoint_root; None keeps every one.
+    keep_checkpoints: int | None = 2
 
     def __post_init__(self) -> None:
         """Reject unbounded runs and invalid cadence or seed."""
@@ -80,6 +83,8 @@ class RunConfig:
             and self.max_steps < 1
             or self.max_seconds is not None
             and (not math.isfinite(self.max_seconds) or self.max_seconds <= 0)
+            or self.keep_checkpoints is not None
+            and self.keep_checkpoints < 1
         ):
             raise ValueError("Invalid or unbounded training run")
 
@@ -139,8 +144,9 @@ def _save_and_evaluate(
     optimizer_id: str,
     evaluate: Evaluator | None,
     report: Reporter | None,
+    keep_checkpoints: int | None,
 ) -> None:
-    """Publish a complete checkpoint before optional gameplay."""
+    """Publish a complete checkpoint, prune older ones, then evaluate."""
     destination = checkpoint_root / f"step-{cursor.next_batch:08d}"
     training_state.save(
         destination,
@@ -151,6 +157,8 @@ def _save_and_evaluate(
     )
     if report is not None:
         report({"checkpoint": str(destination)})
+    if keep_checkpoints is not None:
+        discovery.prune_checkpoints(checkpoint_root, keep_checkpoints)
     if evaluate is not None:
         metrics = evaluate(current, cursor.next_batch)
         if report is not None:
@@ -214,6 +222,10 @@ def run[RecordT](
     invocation's first raises and names the program. A changed batch shape,
     dtype, or placement then fails loudly instead of silently recompiling.
     Evaluation and checkpoint callbacks aren't checked.
+
+    After each checkpoint, only ``config.keep_checkpoints`` newest ``step-``
+    directories remain under ``checkpoint_root``; ``None`` keeps them all.
+    Saves are atomic, so the newest checkpoint is always complete.
     """
     placement = _state_placement(update, required_platform)
     updates_per_epoch = _epoch_update_count(
@@ -293,12 +305,11 @@ def run[RecordT](
                 ):
                     result = compiled(current, batch.microbatches, batch.active)
                 # Reading the commit flag waits for the device, so the time
-                # covers execution, not just asynchronous dispatch.
-                committed_update = bool(result.committed)
-                update_seconds = _now() - update_started
-                if not committed_update:
+                # below covers execution, not just asynchronous dispatch.
+                if not bool(result.committed):
                     code = int(result.code)
                     raise RuntimeError(f"Training update rejected, code={code}")
+                update_seconds = _now() - update_started
                 current = result.state
                 cursor = dataclasses.replace(
                     cursor, next_batch=cursor.next_batch + 1
@@ -337,6 +348,7 @@ def run[RecordT](
                         optimizer_id,
                         evaluate,
                         report,
+                        config.keep_checkpoints,
                     )
                     last_saved = cursor.next_batch
                 if (
@@ -372,6 +384,7 @@ def run[RecordT](
                 optimizer_id,
                 evaluate,
                 report,
+                config.keep_checkpoints,
             )
     finally:
         _close_if_supported(source_batches)

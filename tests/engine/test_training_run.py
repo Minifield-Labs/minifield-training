@@ -891,3 +891,51 @@ def test_strict_compiles_name_a_recompiled_update(
     else:
         _, cursor = run()
         assert cursor.next_batch == 3
+
+
+@pytest.mark.parametrize(
+    ("keep", "remaining"), [(2, [3, 4]), (None, [1, 2, 3, 4])]
+)
+def test_runner_keeps_only_the_newest_checkpoints(
+    tmp_path: Path, keep: int | None, remaining: list[int]
+) -> None:
+    """The default keeps 2 checkpoints; None keeps every one."""
+    inventory = parameters.build_inventory(
+        {"weight": (1,)}, format_id="runner/1", decayed_names=frozenset()
+    )
+    initial = adamw.initialize_state(
+        {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
+    )
+
+    def terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Give every update a finite gradient."""
+        return params["weight"][0] * jnp.sum(batch["x"]), jnp.float32(1)
+
+    def source(
+        start: int, unused_deadline: float | None
+    ) -> Iterator[contracts.PhysicalUpdate]:
+        """Yield identical single-row updates."""
+        for index in range(start, 4):
+            yield contracts.PhysicalUpdate(
+                {"x": jnp.ones((1, 2), dtype=jnp.float32)},
+                np.asarray([True]),
+                (str(index),),
+            )
+
+    training_run.run(
+        None,
+        initial,
+        step.make_jit_step(terms, inventory, adamw.AdamWConfig(0.01)),
+        inventory,
+        training_run.RunConfig(0, 1, 1, max_steps=4, keep_checkpoints=keep),
+        checkpoint_root=tmp_path,
+        optimizer_id="optimizer",
+        cursor=training_state.Cursor("run", "data", "source", 0),
+        required_platform="cpu",
+        batch_source=source,
+    )
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        f"step-{index:08d}" for index in remaining
+    ]

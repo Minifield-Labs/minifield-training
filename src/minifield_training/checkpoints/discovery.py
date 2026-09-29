@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import re
+import shutil
 from typing import cast
 
 
@@ -68,3 +69,24 @@ def latest_checkpoint(
             continue
         candidates.append((int(match.group(1)), directory))
     return max(candidates)[1] if candidates else None
+
+
+def prune_checkpoints(root: Path, keep: int) -> list[Path]:
+    """Delete all but the ``keep`` newest ``step-`` directories under root.
+
+    Only real directories named ``step-`` plus at least 8 digits count;
+    symlinks and other names are left alone. Returns the deleted paths.
+    """
+    if keep < 1:
+        raise ValueError("Keep at least one checkpoint")
+    steps = sorted(
+        (int(match.group(1)), directory)
+        for directory in (root.iterdir() if root.exists() else ())
+        if (match := re.fullmatch(r"step-([0-9]{8,})", directory.name))
+        and directory.is_dir()
+        and not directory.is_symlink()
+    )
+    removed = [directory for _, directory in steps[:-keep]]
+    for directory in removed:
+        shutil.rmtree(directory)
+    return removed

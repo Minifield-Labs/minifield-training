@@ -109,6 +109,7 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
         cursor=SimpleNamespace(next_batch=0),
         checkpoints=tmp_path,
         optimizer=SimpleNamespace(implementation_identity="test"),
+        OPTIMIZER_ID="test",
         evaluator=SimpleNamespace(callback=lambda *_args: None),
         diagnostics=SimpleNamespace(
             monitor=lambda *_args: contextlib.nullcontext()

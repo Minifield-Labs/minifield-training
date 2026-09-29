@@ -136,3 +136,9 @@ begin/end markers synchronize pending results at their boundaries. The runner
 also identifies state validation and batch readiness. The default callback is
 absent, so normal training has no added synchronization. A `JitStep` has no
 internal boundaries to mark; MagicBox's notebook compiles it ahead of time.
+
+`make_step`, `make_jit_step`, and `strategies.schema_fields.make_step` accept
+`transaction=` to choose the optimizer commit; the default is the
+transactional `adamw.make_transaction`. `RunConfig(...,
+keep_checkpoints=2)` deletes all but the newest checkpoints after each save
+(`None` keeps every one), so long runs stay within a bounded output size.
