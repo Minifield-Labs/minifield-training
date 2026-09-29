@@ -1,6 +1,6 @@
 """Bounded single-host lifecycle over caller-supplied batch strategies."""
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextlib import nullcontext
 import dataclasses
@@ -165,6 +165,40 @@ def _save_and_evaluate(
             report({"step": float(cursor.next_batch), **metrics})
 
 
+@dataclasses.dataclass
+class _WaitClock:
+    """Accumulate the time training waited for its next batch."""
+
+    seconds: float = 0.0
+
+    def wrap[T](self, batches: Iterable[T]) -> Iterator[T]:
+        """Time each fetch; leave the underlying iterator open on exit."""
+        iterator = iter(batches)
+        while True:
+            started = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                return
+            self.seconds += time.perf_counter() - started
+            yield batch
+
+
+def _epoch_updates[RecordT](
+    examples: Sequence[RecordT] | None,
+    batch_strategy: batching.BatchStrategy[RecordT] | None,
+    next_batch: int,
+    updates_per_epoch: int,
+    seed: int,
+) -> Iterator[batching.PhysicalUpdate]:
+    """Resume a finite dataset's seeded epoch at the global cursor."""
+    assert examples is not None and batch_strategy is not None
+    epoch, offset = divmod(next_batch, updates_per_epoch)
+    return batch_strategy.iter_updates(
+        examples, seed=seed + epoch, start_update=offset
+    )
+
+
 def _close_if_supported(iterator: object) -> None:
     """Release a producer iterator when it owns external resources."""
     close = getattr(iterator, "close", None)
@@ -216,7 +250,9 @@ def run[RecordT](
     batch source instead starts at the global next-batch cursor and must yield
     deterministic, non-repeating updates until the run bound is reached. Only
     one logical update's arrays are transferred at a time. The caller provides
-    persistent checkpoints and optional gameplay evaluation.
+    persistent checkpoints and optional gameplay evaluation. Periodic
+    reports include ``batch_wait_seconds``, the mean time an update waited
+    for its batch, so a slow host pipeline is visible.
 
     With ``strict_compiles``, any XLA compilation during an update after the
     invocation's first raises and names the program. A changed batch shape,
@@ -256,6 +292,7 @@ def run[RecordT](
     warm_seconds = 0.0
     warm_updates = 0
     last_saved = -1
+    clock = _WaitClock()
     source_batches = (
         batch_source(cursor.next_batch, deadline)
         if batch_source is not None
@@ -271,15 +308,17 @@ def run[RecordT](
                 and _now() - started >= config.max_seconds
             ):
                 break
-            if batch_source is None:
-                assert examples is not None and batch_strategy is not None
-                epoch, offset = divmod(cursor.next_batch, updates_per_epoch)
-                batches = batch_strategy.iter_updates(
-                    examples, seed=config.seed + epoch, start_update=offset
+            batches = clock.wrap(
+                _epoch_updates(
+                    examples,
+                    batch_strategy,
+                    cursor.next_batch,
+                    updates_per_epoch,
+                    config.seed,
                 )
-            else:
-                assert source_batches is not None
-                batches = source_batches
+                if source_batches is None
+                else source_batches
+            )
             for batch in batches:
                 if phase is not None:
                     phase("batch.ready")
@@ -337,6 +376,7 @@ def run[RecordT](
                                 if warm_seconds > 0
                                 else 0.0
                             ),
+                            "batch_wait_seconds": clock.seconds / committed,
                         }
                     )
                 if cursor.next_batch % config.checkpoint_every == 0:
