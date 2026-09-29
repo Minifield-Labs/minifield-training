@@ -76,7 +76,7 @@ def test_direct_hardware_probe(
     )
     if valid:
         _execute(_cells()[3], namespace)
-        assert namespace["REQUESTS"] == count
+        assert namespace["ROWS"] == count * namespace["ROWS_PER_DEVICE"]
         assert namespace["DEVICES"] == count
     else:
         with pytest.raises(RuntimeError):
@@ -105,7 +105,7 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
         update=object(),
         dataclasses=SimpleNamespace(replace=lambda value, **_kwargs: value),
         inventory=object(),
-        stream=SimpleNamespace(updates_per_epoch=100),
+        stream=SimpleNamespace(total_updates=300),
         cursor=SimpleNamespace(next_batch=0),
         checkpoints=tmp_path,
         optimizer=SimpleNamespace(implementation_identity="test"),
