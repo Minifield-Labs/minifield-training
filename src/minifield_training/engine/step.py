@@ -72,6 +72,59 @@ def _parallel_gradient(
     )
 
 
+def _physical_gradient(
+    loss_terms: LossTerms,
+    inventory: core_parameters.FullParameterInventory,
+    mesh: jax.sharding.Mesh | None,
+) -> PhysicalGradient:
+    """Differentiate trainable leaves of one physical batch, optionally split.
+
+    Frozen masters join the forward pass without receiving a gradient.
+    """
+    if not inventory.trainable_names:
+        raise ValueError("Logical updates need a trainable parameter")
+    trainable_names = inventory.trainable_names
+    frozen_names = inventory.frozen_names
+
+    def gradient(
+        parameters: types.Parameters, batch: types.DeviceBatch
+    ) -> tuple[jax.Array, jax.Array, types.Parameters]:
+        """Differentiate one physical batch without optimizer state."""
+        trainable = {name: parameters[name] for name in trainable_names}
+        frozen = {name: parameters[name] for name in frozen_names}
+
+        def objective(
+            selected: types.Parameters,
+        ) -> tuple[jax.Array, jax.Array]:
+            """Join frozen masters only for the forward pass."""
+            loss, count = loss_terms({**frozen, **selected}, batch)
+            if loss.shape or count.shape:
+                raise ValueError("loss and count must be scalars")
+            if np.dtype(loss.dtype) != np.dtype(np.float32) or np.dtype(
+                count.dtype
+            ) != np.dtype(np.float32):
+                raise ValueError("loss and count must be float32")
+            return loss, count
+
+        (loss, count), gradients = jax.value_and_grad(objective, has_aux=True)(
+            trainable
+        )
+        return loss, count, gradients
+
+    return gradient if mesh is None else _parallel_gradient(gradient, mesh)
+
+
+def _require_divisible_rows(
+    microbatches: types.DeviceBatch, mesh: jax.sharding.Mesh | None
+) -> None:
+    """Reject physical rows that cannot split evenly across the data mesh."""
+    if mesh is not None and any(
+        value.ndim < 2 or value.shape[1] % mesh.size
+        for value in microbatches.values()
+    ):
+        raise ValueError("Physical rows must be divisible by device count")
+
+
 @dataclass(frozen=True)
 class StreamingStep:
     """Compile physical gradients and the commit as separate programs.
@@ -121,11 +174,7 @@ class StreamingStep:
             for value in microbatches.values()
         ):
             raise ValueError("microbatches need a common leading axis")
-        if self.mesh is not None and any(
-            value.ndim < 2 or value.shape[1] % self.mesh.size
-            for value in microbatches.values()
-        ):
-            raise ValueError("Physical rows must be divisible by device count")
+        _require_divisible_rows(microbatches, self.mesh)
         enabled = np.asarray(active)
         total: Accumulation | None = None
         for index in np.flatnonzero(enabled):
@@ -202,39 +251,7 @@ def make_streaming_step(
     memory for both the reverse pass and the carried gradients. Keep it opt-in
     until target-device peak memory and throughput are measured.
     """
-    if not inventory.trainable_names:
-        raise ValueError("Logical updates need a trainable parameter")
-    trainable_names = inventory.trainable_names
-    frozen_names = inventory.frozen_names
-
-    def gradient(
-        parameters: types.Parameters, batch: types.DeviceBatch
-    ) -> tuple[jax.Array, jax.Array, types.Parameters]:
-        """Differentiate one physical batch without optimizer state."""
-        trainable = {name: parameters[name] for name in trainable_names}
-        frozen = {name: parameters[name] for name in frozen_names}
-
-        def objective(
-            selected: types.Parameters,
-        ) -> tuple[jax.Array, jax.Array]:
-            """Join frozen masters only for the forward pass."""
-            loss, count = loss_terms({**frozen, **selected}, batch)
-            if loss.shape or count.shape:
-                raise ValueError("loss and count must be scalars")
-            if np.dtype(loss.dtype) != np.dtype(np.float32) or np.dtype(
-                count.dtype
-            ) != np.dtype(np.float32):
-                raise ValueError("loss and count must be float32")
-            return loss, count
-
-        (loss, count), gradients = jax.value_and_grad(objective, has_aux=True)(
-            trainable
-        )
-        return loss, count, gradients
-
-    physical_gradient = (
-        gradient if mesh is None else _parallel_gradient(gradient, mesh)
-    )
+    physical_gradient = _physical_gradient(loss_terms, inventory, mesh)
 
     def add(
         accumulated: types.Parameters,
@@ -287,6 +304,8 @@ def make_step(
     loss_terms: LossTerms,
     inventory: core_parameters.FullParameterInventory,
     config: adamw.AdamWConfig,
+    *,
+    mesh: jax.sharding.Mesh | None = None,
 ) -> LogicalStep:
     """Build a pure logical update from unaveraged loss and target count.
 
@@ -294,10 +313,10 @@ def make_step(
     microbatch axis. ``active`` is a boolean vector on that axis. Inactive
     slots skip the objective and contribute zeros. Only trainable inventory
     leaves are differentiated; the full FP32 tree reaches the forward call.
-    The returned function is compatible with ``jax.jit``.
+    The returned function is compatible with ``jax.jit``. An optional data
+    mesh splits each physical batch's rows as in ``make_streaming_step``.
     """
-    if not inventory.trainable_names:
-        raise ValueError("Logical updates need a trainable parameter")
+    physical_gradient = _physical_gradient(loss_terms, inventory, mesh)
     transition = adamw.make_transaction(inventory, config)
     trainable_names = inventory.trainable_names
 
@@ -315,26 +334,11 @@ def make_step(
             for value in microbatches.values()
         ):
             raise ValueError("microbatches need a common leading axis")
-        trainable = {
-            name: full_state["params"][name] for name in trainable_names
+        _require_divisible_rows(microbatches, mesh)
+        zeros = {
+            name: jnp.zeros_like(full_state["params"][name])
+            for name in trainable_names
         }
-        frozen = {
-            name: full_state["params"][name] for name in inventory.frozen_names
-        }
-        zeros = jax.tree.map(jnp.zeros_like, trainable)
-
-        def objective(
-            selected: types.Parameters, batch: types.DeviceBatch
-        ) -> tuple[jax.Array, jax.Array]:
-            """Rebuild the full forward tree while tracing selected leaves."""
-            total, count = loss_terms({**frozen, **selected}, batch)
-            if total.shape or count.shape:
-                raise ValueError("loss and count must be scalars")
-            if np.dtype(total.dtype) != np.dtype(np.float32) or np.dtype(
-                count.dtype
-            ) != np.dtype(np.float32):
-                raise ValueError("loss and count must be float32")
-            return total, count
 
         def accumulate(
             carry: tuple[jax.Array, jax.Array, types.Parameters, jax.Array],
@@ -349,10 +353,7 @@ def make_step(
                 _: None,
             ) -> tuple[jax.Array, jax.Array, types.Parameters]:
                 """Differentiate the summed loss of an active slot."""
-                (loss, count), gradients = jax.value_and_grad(
-                    objective, has_aux=True
-                )(trainable, batch)
-                return loss, count, gradients
+                return physical_gradient(full_state["params"], batch)
 
             def skip(_: None) -> tuple[jax.Array, jax.Array, types.Parameters]:
                 """Supply finite neutral values for an inactive slot."""
@@ -383,3 +384,65 @@ def make_step(
         )
 
     return step
+
+
+@dataclass(frozen=True)
+class JitStep:
+    """One donated program for gradients, accumulation, and the commit.
+
+    ``update`` compiles the scanned logical update once per batch shape and
+    consumes its state argument. Continue from ``CommitResult.state`` after
+    both committed and rejected updates. ``gradient`` is the separately
+    compiled physical gradient for diagnostics and gradient comparisons; the
+    training update never calls it.
+    """
+
+    update: LogicalStep
+    gradient: PhysicalGradient
+    mesh: jax.sharding.Mesh | None = None
+
+    def __call__(
+        self,
+        full_state: state.State,
+        microbatches: types.DeviceBatch,
+        active: NDArray[np.bool_] | jax.Array,
+    ) -> adamw.CommitResult:
+        """Run the compiled logical update."""
+        return self.update(full_state, microbatches, jnp.asarray(active))
+
+    def lower(
+        self,
+        full_state: state.State,
+        microbatches: types.DeviceBatch,
+        active: NDArray[np.bool_] | jax.Array,
+    ) -> jax.stages.Lowered:
+        """Lower the exact call signature for an ahead-of-time compile.
+
+        Compiling the result populates the cache that later calls use.
+        """
+        # jax.jit returns a wrapper with lower(); the LogicalStep alias can't
+        # express that attribute.
+        jitted = cast(jax.stages.Wrapped, self.update)
+        return jitted.lower(full_state, microbatches, jnp.asarray(active))
+
+
+def make_jit_step(
+    loss_terms: LossTerms,
+    inventory: core_parameters.FullParameterInventory,
+    config: adamw.AdamWConfig,
+    *,
+    mesh: jax.sharding.Mesh | None = None,
+) -> JitStep:
+    """Compile ``make_step`` as one program that donates optimizer state.
+
+    XLA sees the reverse passes, accumulation, normalization, and AdamW
+    together, so gradient trees stay inside one executable between phases.
+    """
+    return JitStep(
+        jax.jit(
+            make_step(loss_terms, inventory, config, mesh=mesh),
+            donate_argnums=(0,),
+        ),
+        jax.jit(_physical_gradient(loss_terms, inventory, mesh)),
+        mesh,
+    )

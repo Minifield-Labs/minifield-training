@@ -89,7 +89,9 @@ and TPU qualification need separate evidence.
 ## Schema-field supervision
 
 `schema_fields.make_step(forward, inventory, optimizer, mesh=None)` binds typed
-field losses to the shared streaming update engine. The caller supplies a
+field losses to the shared single-program update engine
+(`engine.step.make_jit_step`). Gradients, accumulation, normalization, and
+the AdamW commit compile together, and the state argument is donated. The caller supplies a
 training forward and complete parameter inventory. It imports no concrete model
 and owns no checkpoint writer, tokenizer, dataset wire format, or release pin.
 The example binds its selected encoder and heads through this interface.

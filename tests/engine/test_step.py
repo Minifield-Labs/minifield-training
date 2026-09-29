@@ -1,6 +1,7 @@
 """Independent checks for token-weighted logical updates."""
 
 import dataclasses
+import logging
 
 import jax
 import jax.numpy as jnp
@@ -347,3 +348,78 @@ def test_phase_marker_identifies_optimizer_failure() -> None:
     with pytest.raises(RuntimeError, match="optimizer failure"):
         update(initial, _batch(), np.asarray([True, False]))
     assert events[-2:] == ["normalization.end", "optimizer.begin"]
+
+
+def test_jit_step_commits_analytical_update_from_donated_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One compiled program commits the analytical update and consumes state."""
+    inventory, config, initial = _setup()
+    # Commit the state as the runner does, so outputs reuse one executable.
+    initial = jax.device_put(initial, jax.devices()[0])
+    update = step.make_jit_step(_terms, inventory, config)
+    first = update(initial, _batch(), np.asarray([True, True]))
+    # Residuals 3, 5, 7 and 9 give mean loss 41 and mean gradient 35. The
+    # first Adam step moves the unclipped weight by the learning rate.
+    assert bool(first.committed)
+    np.testing.assert_allclose(first.loss, 41.0, rtol=1e-6)
+    np.testing.assert_allclose(first.state["m"]["weight"], 3.5, rtol=1e-6)
+    np.testing.assert_allclose(first.state["v"]["weight"], 61.25, rtol=1e-6)
+    np.testing.assert_allclose(first.state["params"]["weight"], 1.9, rtol=1e-6)
+    np.testing.assert_array_equal(first.state["params"]["frozen"], 1.0)
+    assert initial["params"]["weight"].is_deleted()
+    poisoned = _batch()
+    poisoned["x"] = poisoned["x"].at[1].set(jnp.nan)
+    with jax.log_compiles(), caplog.at_level(logging.WARNING):
+        second = update(first.state, poisoned, np.asarray([True, False]))
+    assert bool(second.committed)
+    np.testing.assert_allclose(second.loss, 2.9**2, rtol=1e-6)
+    assert int(second.state["step"]) == 2
+    assert "Finished XLA compilation of jit(step)" not in caplog.text
+
+
+def test_jit_step_rejection_returns_exact_incoming_values() -> None:
+    """A rejected donated update publishes the incoming state unchanged."""
+    inventory, config, initial = _setup()
+    expected = jax.tree.map(lambda value: np.asarray(value).copy(), initial)
+    batch = _batch()
+    batch["mask"] = batch["mask"].at[0, 0].set(-1.0)
+    result = step.make_jit_step(_terms, inventory, config)(
+        initial, batch, np.asarray([True, True])
+    )
+    assert not bool(result.committed)
+    assert int(result.code) == adamw.CommitCode.ACCUMULATION_INVALID
+    _same_state(result.state, expected)
+
+
+def test_jit_step_gradient_matches_streaming_gradient() -> None:
+    """The diagnostic gradient is the physical gradient of either engine."""
+    inventory, config, initial = _setup()
+    physical = {name: value[1] for name, value in _batch().items()}
+    jitted = step.make_jit_step(_terms, inventory, config).gradient(
+        initial["params"], physical
+    )
+    streamed = step.make_streaming_step(_terms, inventory, config).gradient(
+        initial["params"], physical
+    )
+    # Slot 1 alone: residuals 5, 7, 9 give loss 155 and gradient 2*(10+21+36).
+    np.testing.assert_allclose(jitted[0], 155.0, rtol=1e-6)
+    np.testing.assert_allclose(jitted[2]["weight"], 134.0, rtol=1e-6)
+    _same_state(jitted, streamed)
+
+
+@pytest.mark.parametrize("ahead_of_time", [False, True])
+def test_ahead_of_time_compile_serves_the_first_update(
+    ahead_of_time: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Compiling the lowered call leaves nothing to compile at update time."""
+    inventory, config, initial = _setup()
+    initial = jax.device_put(initial, jax.devices()[0])
+    update = step.make_jit_step(_terms, inventory, config)
+    if ahead_of_time:
+        update.lower(initial, _batch(), np.asarray([True, True])).compile()
+    with jax.log_compiles(), caplog.at_level(logging.WARNING):
+        result = update(initial, _batch(), np.asarray([True, True]))
+    assert bool(result.committed)
+    compiled_at_update = "Finished XLA compilation of jit(step)" in caplog.text
+    assert compiled_at_update is not ahead_of_time

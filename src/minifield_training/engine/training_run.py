@@ -75,10 +75,15 @@ def require_devices(
 
 
 def _state_placement(
-    update: step.LogicalStep | step.StreamingStep, platform: str | None
+    update: step.LogicalStep | step.StreamingStep | step.JitStep,
+    platform: str | None,
 ) -> jax.Device | jax.sharding.NamedSharding:
     """Admit the step's device topology and place one logical state."""
-    mesh = update.mesh if isinstance(update, step.StreamingStep) else None
+    mesh = (
+        update.mesh
+        if isinstance(update, step.StreamingStep | step.JitStep)
+        else None
+    )
     if mesh is None:
         return require_single_device(platform)
     devices = require_devices(mesh.size, platform)
@@ -145,7 +150,7 @@ def _epoch_update_count[RecordT](
 def run[RecordT](
     examples: Sequence[RecordT] | None,
     initial_state: state.State,
-    update: step.LogicalStep | step.StreamingStep,
+    update: step.LogicalStep | step.StreamingStep | step.JitStep,
     inventory: core_parameters.FullParameterInventory,
     config: RunConfig,
     *,
@@ -182,7 +187,9 @@ def run[RecordT](
     if int(initial_state["step"]) != cursor.next_batch:
         raise ValueError("Optimizer step and data cursor disagree")
     compiled = (
-        update if isinstance(update, step.StreamingStep) else jax.jit(update)
+        update
+        if isinstance(update, step.StreamingStep | step.JitStep)
+        else jax.jit(update)
     )
     # Loaded arrays may be physically on this device but uncommitted. The
     # first JIT result is committed; starting committed keeps one compilation
