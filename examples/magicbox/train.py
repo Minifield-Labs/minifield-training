@@ -1,7 +1,8 @@
-"""Train the encoder and heads with frozen embeddings and exact resume."""
+"""Train the joint pointer model with frozen embeddings and exact resume."""
 
 import argparse
 import dataclasses
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -13,15 +14,17 @@ from examples.magicbox import bundle as magicbox_bundle
 from examples.magicbox import composition as magicbox
 from examples.magicbox import data
 from examples.magicbox import source
-from minifield_training.batching import schema_fields as batching
+from minifield_training.batching import pointer as batching
 from minifield_training.checkpoints import discovery
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
 from minifield_training.engine import training_run
+from minifield_training.evaluation import pointer as evaluate_pointer
 from minifield_training.evaluation import schema_fields as evaluate
 from minifield_training.models.lfm2_5 import encoder
-from minifield_training.models.magicbox import model
-from minifield_training.objectives import schema_fields as objective
+from minifield_training.models.magicbox import pointer
+from minifield_training.objectives import pointer as objective
+from minifield_training.objectives import schema_fields as weighting
 from minifield_training.optimizers import adamw
 from minifield_training.strategies import pretrained
 from minifield_training.strategies import schema_fields as strategy
@@ -36,12 +39,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--platform", choices=("cpu", "tpu"), default="tpu")
     parser.add_argument("--requests", type=int, default=8)
     parser.add_argument("--microbatches", type=int, default=4)
-    parser.add_argument("--source-tokens", type=int, default=1024)
-    parser.add_argument("--schema-tokens", type=int, default=512)
-    parser.add_argument("--schema-rows", type=int, default=256)
-    # Packed encoder rows per request; omitted means measure every split.
-    parser.add_argument("--schema-sequences", type=int)
-    parser.add_argument("--row-chunk", type=int, default=4)
+    # Joint sequence tokens and questions per request; omitted means measure
+    # every split and round tokens up to a multiple of 128.
+    parser.add_argument("--sequence-tokens", type=int)
+    parser.add_argument("--questions", type=int)
+    parser.add_argument("--score-width", type=float, default=0.15)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-hours", type=float, default=8)
@@ -84,42 +86,36 @@ def main() -> None:
     cfg = encoder.Adapter().parse_config(
         json_io.object_map(json.loads(config_path.read_text()))
     )
-    fusion = model.Config(
-        encoder_width=cfg.hidden_size, row_chunk=args.row_chunk
-    )
-    sequences = (
-        corpus.packed_sequences(
-            sorted({str(shard["split"]) for shard in corpus.shards}),
-            args.schema_tokens,
-        )
-        if args.schema_sequences is None
-        else args.schema_sequences
+    head = pointer.Config(encoder_width=cfg.hidden_size)
+    tokens, questions = corpus.pointer_extent(
+        sorted({str(shard["split"]) for shard in corpus.shards})
     )
     shape = batching.Shape(
         args.microbatches,
         args.requests,
-        args.source_tokens,
-        args.schema_tokens,
-        args.schema_rows,
+        args.sequence_tokens or -(-tokens // 128) * 128,
+        args.questions or questions,
         cfg.vocab_size,
         0,
-        schema_sequences=sequences,
     )
-    if (
-        max(shape.source_tokens, shape.schema_tokens)
-        > encoder.MAX_SEQUENCE_LENGTH
-    ):
+    if shape.sequence_tokens > encoder.MAX_SEQUENCE_LENGTH:
         raise ValueError("Requested tokens exceed the encoder context")
-    batches = batching.SchemaBatchStrategy(
-        shape, objective.balance_types, fixed_shape=True
+    batches = batching.PointerBatchStrategy(shape, weighting.balance_types)
+    stream = source.training_stream(
+        corpus,
+        batches,
+        args.seed,
+        args.epochs,
+        functools.partial(
+            corpus.compile_pointer, split="train", score_width=args.score_width
+        ),
     )
-    stream = source.training_stream(corpus, batches, args.seed, args.epochs)
-    inventory = magicbox.inventory(cfg, fusion)
+    inventory = magicbox.pointer_inventory(cfg, head)
     optimizer = adamw.AdamWConfig(learning_rate=args.learning_rate)
     identity = {
         "source": dataclasses.asdict(encoder.SOURCE),
         "encoder": dataclasses.asdict(cfg),
-        "fusion": dataclasses.asdict(fusion),
+        "head": dataclasses.asdict(head),
         "shape": {
             key: value
             for key, value in dataclasses.asdict(shape).items()
@@ -129,8 +125,9 @@ def main() -> None:
         "bf16": not args.fp32,
         "devices": args.devices,
         "contract": data.FORMAT,
-        "batching": "fixed-shape-packed-schema/1",
-        "implementation": "magicbox-jax/2-frozen-token-embeddings",
+        "template": data.POINTER_TEMPLATE,
+        "score_width": args.score_width,
+        "implementation": "magicbox-pointer-jax/1",
     }
     source_id = hashlib.sha256(json_io.canonical(identity).encode()).hexdigest()
     checkpoints = args.output / "checkpoints"
@@ -157,7 +154,7 @@ def main() -> None:
             args.model_dir, encoder.SOURCE, encoder.Adapter()
         )
         parameters.update(
-            model.initialize(fusion, jax.random.PRNGKey(args.seed))
+            pointer.initialize(head, jax.random.PRNGKey(args.seed))
         )
         current = adamw.initialize_state(parameters, inventory)
         cursor = training_state.Cursor(
@@ -177,11 +174,12 @@ def main() -> None:
         )
     )
     evaluator = evaluate.Evaluator(
-        corpus.records,
-        evaluate.Predictor(
-            magicbox.bind(cfg, fusion, bf16=not args.fp32), batches
+        corpus.pointer_records,
+        evaluate_pointer.Predictor(
+            magicbox.bind_pointer(cfg, head, bf16=not args.fp32), batches
         ),
         names=data.KINDS,
+        metrics=evaluate_pointer.Metrics,
     )
     remaining = args.epochs * stream.updates_per_epoch - cursor.next_batch
     if args.max_steps is not None:
@@ -195,10 +193,11 @@ def main() -> None:
             max_seconds=args.max_hours * 3600,
         )
         update = strategy.make_step(
-            magicbox.bind(cfg, fusion, training=True, bf16=not args.fp32),
+            magicbox.bind_pointer(cfg, head, bf16=not args.fp32),
             inventory,
             optimizer,
             mesh=mesh,
+            terms=objective.terms,
         )
         with (args.output / "progress.jsonl").open(
             "a", encoding="utf-8"
@@ -225,6 +224,7 @@ def main() -> None:
                 report=report,
                 required_platform=args.platform,
                 batch_source=stream,
+                strict_compiles=True,
             )
     completed = cursor.next_batch >= args.epochs * stream.updates_per_epoch
     if completed or args.evaluate_only:
@@ -239,11 +239,11 @@ def main() -> None:
                 print(json.dumps({"split": split, **metrics}), flush=True)
     bundle = args.output / f"bundle-{cursor.next_batch:08d}"
     if not bundle.exists():
-        magicbox_bundle.save(
+        magicbox_bundle.save_pointer(
             bundle,
             current["params"],
             cfg,
-            fusion,
+            head,
             encoder_config=config_path,
             tokenizer=args.dataset / "tokenizer",
             step=cursor.next_batch,

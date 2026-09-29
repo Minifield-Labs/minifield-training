@@ -1,4 +1,4 @@
-"""Load a trained bundle and turn public JSON requests into typed results."""
+"""Load a trained pointer bundle and turn public JSON requests into answers."""
 
 import argparse
 import json
@@ -8,15 +8,14 @@ from examples.magicbox import bundle as magicbox_bundle
 from examples.magicbox import composition as magicbox
 from examples.magicbox import data
 from examples.magicbox import tokenizer
-from minifield_training.batching import schema_fields as batching
+from minifield_training.batching import pointer as batching
 from minifield_training.core import json_io
-from minifield_training.evaluation import schema_fields as evaluation
-from minifield_training.models.lfm2_5 import encoder
+from minifield_training.evaluation import pointer as evaluation
 from minifield_training.objectives import schema_fields as objective
 
 
 def main() -> None:
-    """Run one request file through restored encoder, heads, and decoder."""
+    """Run one request file through the restored encoder and pointers."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--request", type=Path, required=True)
@@ -26,22 +25,25 @@ def main() -> None:
     if request.get("questions") == {}:
         print("{}")
         return
-    cfg, fusion, parameters, decode_config = magicbox_bundle.load(args.bundle)
+    cfg, head, parameters, decode_config = magicbox_bundle.load_pointer(
+        args.bundle
+    )
     adapter = tokenizer.Adapter(args.bundle / "tokenizer")
-    record = data.compile_record("inference", request, {}, adapter.encode)
-    maximum = batching.Shape(
-        1,
-        1,
-        encoder.MAX_SEQUENCE_LENGTH,
-        encoder.MAX_SEQUENCE_LENGTH,
-        max(sum(len(field.rows) for field in record.fields), 4),
-        cfg.vocab_size,
-        0,
+    record = data.compile_pointer_record(
+        "inference", request, {}, adapter.encode
     )
     predictor = evaluation.Predictor(
-        magicbox.bind(cfg, fusion, bf16=not args.fp32),
-        batching.SchemaBatchStrategy(
-            maximum, objective.balance_types, min_tokens=128, min_rows=4
+        magicbox.bind_pointer(cfg, head, bf16=not args.fp32),
+        batching.PointerBatchStrategy(
+            batching.Shape(
+                1,
+                1,
+                record.sequence_tokens,
+                len(record.questions),
+                cfg.vocab_size,
+                0,
+            ),
+            objective.balance_types,
         ),
         presence_threshold=float(str(decode_config["presence_threshold"])),
     )

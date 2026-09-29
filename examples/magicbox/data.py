@@ -5,9 +5,11 @@ from typing import cast
 
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
+from minifield_training.datasets import pointer
 
 FORMAT = "minifield.magicbox/1.0"
 TEMPLATE = "magicbox-rows/1"
+POINTER_TEMPLATE = "magicbox-pointer/1"
 OFFSET_POLICY = "trim-text-preserve-whitespace/2"
 KINDS = ("extract", "choice", "noul", "score")
 
@@ -69,6 +71,84 @@ def labeled_schema_rows(request: object, targets: object) -> tuple[str, ...]:
         if key in gold
         for text in schema_rows(json_io.object_map(raw))[1]
     )
+
+
+def pointer_texts(
+    question: dict[str, object],
+) -> tuple[str, tuple[tuple[str, str], ...], tuple[str, ...]]:
+    """Serialize one question's query text, labeled options, and legend.
+
+    Each text becomes its own BOS-led token run in the joint sequence; the
+    BOS token is the query or option marker the pointer uses.
+    """
+    kind = str(question.get("type"))
+    if kind not in KINDS:
+        raise ValueError("Unsupported MagicBox question type")
+    instructions = _text(question.get("instructions"))
+    query = f"Type: {kind}\nQuestion: {instructions}"
+    if kind == "extract":
+        return query, (("absent", "Answer: not stated in the text"),), ()
+    if kind == "noul":
+        criteria = question.get("criteria")
+        described = json_io.object_map(criteria) if criteria is not None else {}
+        return (
+            query,
+            tuple(
+                (
+                    label,
+                    f"Answer: {label}"
+                    + (
+                        f"\nDescription: {described[label]}"
+                        if label in described
+                        else ""
+                    ),
+                )
+                for label in ("false", "true")
+            ),
+            (),
+        )
+    if kind == "choice":
+        options = json_io.object_map(question.get("criteria"))
+        if not options:
+            raise ValueError("Choice requires candidates")
+        return (
+            query,
+            tuple(
+                (
+                    _text(key),
+                    f"Candidate: {key}\nDescription: {_text(value)}",
+                )
+                for key, value in options.items()
+            ),
+            (),
+        )
+    levels = question.get("criteria")
+    if not isinstance(levels, list) or not levels:
+        raise ValueError("Score requires ordered levels")
+    return (
+        query,
+        tuple(
+            (
+                str(index),
+                f"Level: {index} of {len(levels)} levels, indexed from 0"
+                f"\nDescription: {_text(value)}",
+            )
+            for index, value in enumerate(levels)
+        ),
+        tuple(_text(value) for value in levels),
+    )
+
+
+def labeled_pointer_texts(request: object, targets: object) -> tuple[str, ...]:
+    """Return every labeled question's query and option text, in order."""
+    questions = json_io.object_map(json_io.object_map(request).get("questions"))
+    gold = json_io.object_map(targets)
+    result: list[str] = []
+    for key, raw in questions.items():
+        if key in gold:
+            query, options, _ = pointer_texts(json_io.object_map(raw))
+            result.extend((query, *(text for _, text in options)))
+    return tuple(result)
 
 
 def _targets(
@@ -185,14 +265,101 @@ def compile_record(
     return fields.Record(record_id, text, source, tuple(compiled_fields))
 
 
+def _pointer_targets(
+    kind: int,
+    labels: tuple[str, ...],
+    label: dict[str, object],
+    source: fields.Encoding,
+    text: str,
+    score_width: float,
+) -> tuple[tuple[float, ...], tuple[int, int] | None] | None:
+    """Turn one gold label into option targets, or None if it can't point.
+
+    Extraction targets hold the "absent" probability. Binary targets split
+    one probability over false and true. Hard score labels spread over nearby
+    levels by ``score_width``; soft labels stay exactly as given.
+    """
+    values, _, span = _targets(
+        kind, labels if kind in (1, 3) else ("",), label, source, text
+    )
+    if kind == 0:
+        # A present answer without an aligned span has nothing to point at.
+        return None if values[0] and span is None else ((1 - values[0],), span)
+    if kind == 2:
+        return (1 - values[0], values[0]), None
+    if kind == 3 and "level" in label:
+        level = label["level"]
+        assert isinstance(level, int)
+        return pointer.ordinal_targets(level, len(labels), score_width), None
+    return values, None
+
+
+def compile_pointer_record(
+    record_id: str,
+    request: object,
+    targets: object,
+    encode: Callable[[str], fields.Encoding],
+    *,
+    score_width: float = 0.0,
+) -> pointer.Record:
+    """Compile the joint pointer layout's questions, options, and targets."""
+    public, gold = json_io.object_map(request), json_io.object_map(targets)
+    text = public.get("state")
+    if not isinstance(text, str):
+        raise ValueError("State must be a string")
+    questions = json_io.object_map(public.get("questions"))
+    if not questions or not set(gold) <= set(questions):
+        raise ValueError("Invalid question or supervision keys")
+    source = encode(text)
+    compiled = []
+    for key, raw in questions.items():
+        query, options, legend = pointer_texts(json_io.object_map(raw))
+        kind = KINDS.index(str(json_io.object_map(raw)["type"]))
+        runs = [encode(item).ids for item in (query, *(t for _, t in options))]
+        if any(not ids or ids[0] != 1 for ids in (source.ids, *runs)):
+            raise ValueError("Query and option markers must be BOS ID 1")
+        labels = tuple(label for label, _ in options)
+        answer = (
+            _pointer_targets(
+                kind,
+                labels,
+                json_io.object_map(gold[_text(key)]),
+                source,
+                text,
+                score_width,
+            )
+            if key in gold
+            else None
+        )
+        compiled.append(
+            pointer.Question(
+                key,
+                kind,
+                runs[0],
+                tuple(
+                    pointer.Option(label, ids)
+                    for label, ids in zip(labels, runs[1:], strict=True)
+                ),
+                (0.0,) * len(labels) if answer is None else answer[0],
+                answer is not None,
+                None if answer is None else answer[1],
+                legend,
+            )
+        )
+    return pointer.Record(record_id, text, source, tuple(compiled))
+
+
 def format_results(
-    record: fields.Record,
+    record: fields.Record | pointer.Record,
     predictions: dict[str, object],
     confidence: Callable[[dict[str, object]], float | None] | None = None,
 ) -> dict[str, object]:
     """Format the public typed response with optional confidence."""
     result: dict[str, object] = {}
-    for field in record.fields:
+    items: tuple[fields.Field | pointer.Question, ...] = (
+        record.fields if isinstance(record, fields.Record) else record.questions
+    )
+    for field in items:
         prediction = json_io.object_map(predictions[field.key])
         kind = KINDS[field.kind]
         item: dict[str, object] = {"type": kind, kind: prediction["value"]}

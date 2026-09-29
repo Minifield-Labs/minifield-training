@@ -11,6 +11,45 @@ and export. The accelerator-free host-memory monitor prints periodic samples
 and flushes them to `OUTPUT/diagnostics/`. A kernel killed by the OS still has no
 Python traceback; the last active stage and flushed samples identify where it stopped.
 
+## Joint pointer model
+
+Training now uses one joint encoder pass per request and answers every
+question by pointing. The request becomes one sequence: each question's query
+text, then its options, then the source text. Every query and option starts
+with a BOS marker token (template `magicbox-pointer/1`):
+
+| Type | Options the question may point at |
+| --- | --- |
+| choice | one `Candidate: ...` marker per candidate |
+| score | one `Level: i of N ...` marker per level |
+| noul | `Answer: false` and `Answer: true` markers |
+| extract | a source span, or one `Answer: not stated in the text` marker |
+
+After the encoder, 2 query/key projections give start and end logits for each
+question over its request's tokens. One masked soft-target cross-entropy
+trains every type. Option answers put the same target on start and end;
+extraction targets the span's first and last tokens, or the "not stated"
+marker. Soft teacher labels pass through unchanged. Hard score labels spread
+over nearby levels (`SCORE_WIDTH`, default 0.15 of the scale's range);
+evaluation compiles its records without spreading, so metrics compare against
+the original labels. Decoding averages the start and end probabilities for
+options, returns the expected level for scores, and picks the best span inside
+one selectable run for extraction.
+
+The notebook measures the longest joint sequence and the most questions in
+any split, rounding tokens up to a multiple of 128. Exported bundles use
+`minifield.magicbox.model/3`. The fusion architecture below still describes
+v1 and v2 bundles, which `bundle.load` continues to admit.
+
+On the pinned TPU compiler (compile-only v5e, see the workspace experiment
+`magicbox-2026-09-29-tpu-compile-memory`), the joint gradient at 2,048 tokens
+and 8 questions peaked at 1.68, 1.76, 2.51, 2.82, and 3.17 GiB of host RAM for
+1, 2, 4, 8, and all 16 encoder layers. The former fusion gradient exceeded
+7 GiB at 1 layer. The single training program including the AdamW commit
+peaked at 1.96 GiB at 1 layer and 6.74 GiB at 4; the commit's finiteness checks
+dominate that difference. Full-depth step memory, TPU execution, throughput,
+and model quality remain unmeasured.
+
 ## Architecture
 
 The backbone is `LiquidAI/LFM2.5-Encoder-350M`, revision
@@ -57,13 +96,14 @@ median and 77 at most, so a request holds 346 schema tokens at the median and
 1,558 at most. Encoding each row in its own padded 512-token pass spends over
 99% of schema encoder work on padding.
 
-Training therefore packs a request's schema rows end to end into
-`SCHEMA_SEQUENCES` encoder rows of 512 tokens. Segment IDs keep attention and
+The fusion model therefore packs a request's schema rows end to end into
+`Shape.schema_sequences` encoder rows of 512 tokens. Segment IDs keep attention and
 convolution inside each schema row, and rotary positions restart per row, so
 every row encodes exactly as it would alone. Fusion still sees one
-`[rows, 512]` view per request, gathered from the packed encoder output. With
-`SCHEMA_SEQUENCES = None`, the notebook measures the most any record in any
-split needs before building the fixed shape. First-fit packing of the local
+`[rows, 512]` view per request, gathered from the packed encoder output.
+`Corpus.packed_sequences` measures the most any record in any split needs.
+The joint pointer model above replaces this path for training; its sequence
+holds each option once, without repeating the question. First-fit packing of the local
 source above needs 1 sequence at the median, 2 at p99, and 4 at most: 2,048
 schema tokens instead of 131,072. The shape stays fixed, so
 the training step still compiles once. The chosen count enters the checkpoint
@@ -97,8 +137,8 @@ no labels.
 ## Run defaults and recovery
 
 The notebook starts in `RUN_MODE = 'smoke'`. It runs up to 10 total updates of
-the full model, using 1 request per device, 1 microbatch, schema chunks of 1,
-and 8 validation records. Its first 2 updates save a checkpoint and verify its parameters, moments, step,
+the full model, using 1 request per device, 1 microbatch, and 8 validation
+records. Its first 2 updates save a checkpoint and verify its parameters, moments, step,
 and cursor against live state before continuing to the 10-update target. Rerunning
 an already completed smoke run adds no training updates. The inference cell
 reloads the exported bundle in the notebook kernel.
@@ -107,14 +147,14 @@ reloads the exported bundle in the notebook kernel.
 requires exactly that many devices on the same host. This supports a Colab
 v5e-1 smoke run and an 8-device full run without changing model architecture.
 Requests per microbatch are `DEVICES * REQUESTS_PER_DEVICE`, with a default
-of 1 request per device. Both modes use fixed training dimensions: 1,024 source tokens, 512 schema
-tokens, and 256 schema rows per request. Padding retains these shapes for every
-update, including the final partial batch. Explicit overflow fails admission
+of 1 request per device. Both modes fix the joint sequence length and question
+count from the dataset's measured maximum. Padding retains these shapes for
+every update, including the final partial batch. Explicit overflow fails admission
 without truncation.
 
 Set `RUN_MODE = 'full'` for these full-training defaults:
 
-- 3 epochs, frozen pretrained token embeddings; encoder trunk, fusion, and heads train.
+- 3 epochs, frozen pretrained token embeddings; the encoder trunk and pointer projections train.
 - All visible TPU devices, 1 request per device, 4 accumulated microbatches.
   On 8 devices this is 32 requests per logical update.
 - BF16 activations, FP32 losses, parameters, and optimizer state.
@@ -153,8 +193,7 @@ Default output directories include mode and device count, for example
 `magicbox-smoke-1dev` and `magicbox-full-8dev`. The full run starts from the
 pretrained encoder; the single-device smoke checkpoint remains a separate
 test artifact. Data parallelism replicates weights and optimizer state on
-each device. The smaller smoke batch and schema chunks reduce activation
-memory; actual TPU memory and throughput still require the hardware run.
+each device. The smaller smoke batch reduces activation memory; actual TPU memory and throughput still require the hardware run.
 
 The default dataset is `protodotdesign/magicbox-v1`, revision
 `f074bb549f16ea091fd8ece12e79652b8082871f`. It contains 693,376 records across

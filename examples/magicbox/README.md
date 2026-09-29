@@ -15,25 +15,24 @@ The notebook defaults to `RUN_MODE = 'smoke'`: 10 updates of the full pretrained
 model, checkpoint saving and full-state reload verification, 8-record validation,
 and inference export/reload. It
 detects all TPU devices on one host. A single-device runtime uses 1 request,
-1 microbatch, and schema chunks of 1. Set `DEVICES = 1` to require that topology.
+1 microbatch. Set `DEVICES = 1` to require that topology.
 
 On the larger runtime, set `RUN_MODE = 'full'`. With 8 devices, its defaults
-are 8 requests per microbatch, 4 microbatches, and schema chunks of 4. Set
+are 8 requests per microbatch and 4 microbatches. Set
 `DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate
 output folders; full mode starts from pretrained weights. Exact optimizer
 resume requires the same device count, batch settings, and fixed-shape policy.
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
 `f074bb549f16ea091fd8ece12e79652b8082871f`. Set `DATASET` to a completed local
-directory to use an attached dataset. Both modes keep the dataset's full
-fixed training dimensions: 1,024 source tokens, 512 schema tokens, and 256
-schema rows per request. Records and final partial batches are padded to these
-limits; the gradient input shape stays constant. Schema rows are packed into
-`SCHEMA_SEQUENCES` encoder rows of 512 tokens per request. With the default
-`None`, the notebook measures the most any record in any split needs before
-building the shape, so the encoder runs on those tokens instead of 256 × 512. Both modes freeze the
-pretrained token embeddings while
-training the remaining 289,282,052 parameters.
+directory to use an attached dataset. Both modes train the joint pointer model
+(see [the MagicBox guide](../../docs/magicbox.md#joint-pointer-model)). With
+`SEQUENCE_TOKENS = None` and `QUESTIONS = None`, the notebook measures the
+longest joint question-and-text sequence and the most questions in any split
+before fixing the shape. `SCORE_WIDTH` spreads hard score labels over nearby
+levels. Both modes freeze the pretrained token embeddings. `train.py` accepts
+the same settings as `--sequence-tokens`, `--questions`, and `--score-width`,
+and `predict.py` loads v3 pointer bundles.
 
 Local offline optimization and checkpoint check:
 

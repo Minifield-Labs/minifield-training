@@ -207,6 +207,8 @@ def test_corpus_measures_packed_sequences_across_splits() -> None:
             {
                 "request_json": [json.dumps(_REQUEST)] * len(targets),
                 "targets_json": targets,
+                "encoding_json": [json.dumps({"source_tokens": 7})]
+                * len(targets),
             }
         )
         for split, targets in (
@@ -219,3 +221,7 @@ def test_corpus_measures_packed_sequences_across_splits() -> None:
     assert corpus.packed_sequences(("train",), 20) == 4
     assert corpus.packed_sequences(("validation",), 20) == 1
     assert corpus.packed_sequences(("validation", "train"), 24) == 3
+    # Pointer texts: tier query 5 + options 5 + 5, mood query 5 + 3 levels of
+    # 11, plus 7 source tokens. The extract-only record has 5 + 7 + 7.
+    assert corpus.pointer_extent(("train",)) == (60, 2)
+    assert corpus.pointer_extent(("validation",)) == (19, 1)
