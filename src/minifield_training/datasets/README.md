@@ -98,3 +98,19 @@ Keep each dataset's format documentation and snapshot identity in its own
 directory here. The MagicBox dataset's [v1 format](magicbox/format-v1.md) and
 [producer revision/checksum](magicbox/format-v1.json) define its published
 record contract.
+
+## Pointer questions
+
+`pointer.Record` holds one source and the questions asked about it. Each
+`pointer.Question` has a query token run and the `Option`s it may select;
+`ids[0]` of a query or option is its marker token. Choice, ordinal, and binary
+questions carry a target distribution over their options. An extraction
+question has one option meaning "not stated": `targets[0]` is its probability,
+and `span` marks the answer's `[start, end)` source tokens otherwise.
+Unsupervised questions carry zero targets. `pointer.validate` admits token
+IDs, option inventories, distributions, and selectable spans.
+
+`pointer.ordinal_targets(level, count, width)` spreads a hard ordinal label
+over nearby levels with a Gaussian whose standard deviation is `width` times
+the scale's range. Zero width or one level stays one-hot. Tests check
+hand-computed weights and admission failures.
