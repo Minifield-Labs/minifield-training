@@ -13,17 +13,25 @@ from minifield_training.models.magicbox import model
 
 
 def inventory(
-    cfg: lfm.Config, fusion: model.Config
+    cfg: lfm.Config, fusion: model.Config, *, freeze_embeddings: bool = True
 ) -> core_parameters.FullParameterInventory:
-    """Train all backbone and task parameters, decaying matrix weights."""
+    """Freeze pretrained token embeddings and train the encoder and heads."""
     if cfg.hidden_size != fusion.encoder_width:
         raise ValueError("Encoder and fusion widths differ")
     shapes = {**encoder.Adapter().expected_shapes(cfg), **model.shapes(fusion)}
+    frozen = (
+        frozenset({"lfm2.embed_tokens.weight"})
+        if freeze_embeddings
+        else frozenset()
+    )
     return core_parameters.build_inventory(
         shapes,
         decayed_names=frozenset(
-            name for name, shape in shapes.items() if len(shape) == 2
+            name
+            for name, shape in shapes.items()
+            if len(shape) == 2 and name not in frozen
         ),
+        frozen_names=frozen,
         format_id="minifield.magicbox.parameters/1",
         source_dtype="float32",
         master_dtype="float32",

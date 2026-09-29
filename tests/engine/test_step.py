@@ -1,5 +1,7 @@
 """Independent checks for token-weighted logical updates."""
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -299,3 +301,49 @@ def test_streaming_rejects_invalid_count_without_committing() -> None:
     assert not bool(result.committed)
     assert int(result.code) == adamw.CommitCode.ACCUMULATION_INVALID
     _same_state(result.state, snapshot)
+
+
+@pytest.mark.parametrize("fused", (False, True))
+def test_diagnostic_phases_cover_the_committed_update(fused: bool) -> None:
+    """Explicit diagnostics finish stages in order without changing results."""
+    inventory, config, initial = _setup()
+    events: list[str] = []
+    update = dataclasses.replace(
+        step.make_streaming_step(
+            _terms, inventory, config, fuse_accumulation=fused
+        ),
+        report_phase=events.append,
+    )
+    result = update(initial, _batch(), np.asarray([True, True]))
+    assert bool(result.committed)
+    expected = ["gradient.begin", "gradient.end"]
+    if not fused:
+        expected += ["gradient.begin", "gradient.end"]
+    expected += [
+        "accumulation.begin",
+        "accumulation.end",
+        "normalization.begin",
+        "normalization.end",
+        "optimizer.begin",
+        "optimizer.end",
+    ]
+    assert events == expected
+    assert int(result.state["step"]) == 1
+
+
+def test_phase_marker_identifies_optimizer_failure() -> None:
+    """A failed transition cannot emit a completed optimizer marker."""
+    inventory, config, initial = _setup()
+    events: list[str] = []
+
+    def fail(*_args: object) -> adamw.CommitResult:
+        raise RuntimeError("optimizer failure")
+
+    update = dataclasses.replace(
+        step.make_streaming_step(_terms, inventory, config),
+        transition=fail,
+        report_phase=events.append,
+    )
+    with pytest.raises(RuntimeError, match="optimizer failure"):
+        update(initial, _batch(), np.asarray([True, False]))
+    assert events[-2:] == ["normalization.end", "optimizer.begin"]

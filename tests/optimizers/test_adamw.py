@@ -1,7 +1,9 @@
 """Independent contracts for the AdamW update transaction."""
 
 import math
+from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.typing as npt
@@ -518,3 +520,30 @@ def test_donated_transaction_matches_plain_commit() -> None:
             np.asarray(donated.state["params"][name]),
             np.asarray(plain.state["params"][name]),
         )
+
+
+def test_validation_does_not_convert_state_arrays_to_numpy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation reads reduced flags without copying the full host trees."""
+    full_state = _make_state()
+    leaves = {
+        id(value)
+        for group in (full_state["params"], full_state["m"], full_state["v"])
+        for value in group.values()
+    }
+    original = np.asarray
+    transferred_shapes = []
+
+    def guard(value: object, *args: Any, **kwargs: Any) -> Any:
+        """Reject state transfers while allowing reduced validation results."""
+        if id(value) in leaves:
+            raise AssertionError("Full state leaf transferred to NumPy")
+        if isinstance(value, jax.Array):
+            transferred_shapes.append(value.shape)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(np, "asarray", guard)
+    adamw.validate_full_weight_state(full_state, _inventory())
+    assert transferred_shapes.count((3,)) == len(full_state["params"])
+    assert all(shape in ((), (3,)) for shape in transferred_shapes)

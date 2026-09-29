@@ -97,6 +97,14 @@ class StreamingStep:
         | None
     ) = None
     mesh: jax.sharding.Mesh | None = None
+    report_phase: Callable[[str], None] | None = None
+
+    def _phase(self, name: str, ready: object = None) -> None:
+        """Synchronize diagnostic boundaries only when explicitly enabled."""
+        if self.report_phase is not None:
+            # JAX 0.7.2 leaves this pytree synchronization API untyped.
+            jax.block_until_ready(ready)  # type: ignore[no-untyped-call]
+            self.report_phase(name)
 
     def __call__(
         self,
@@ -125,9 +133,11 @@ class StreamingStep:
                 name: value[int(index)] for name, value in microbatches.items()
             }
             if total is None:
+                self._phase("gradient.begin")
                 loss, count, gradients = self.gradient(
                     full_state["params"], batch
                 )
+                self._phase("gradient.end", (loss, count, gradients))
                 total = (
                     loss,
                     count,
@@ -135,11 +145,16 @@ class StreamingStep:
                     jnp.isfinite(count) & (count >= 0),
                 )
             elif self.accumulate is not None:
+                self._phase("accumulation.begin")
                 total = self.accumulate(full_state["params"], batch, total)
+                self._phase("accumulation.end", total)
             else:
+                self._phase("gradient.begin")
                 loss, count, gradients = self.gradient(
                     full_state["params"], batch
                 )
+                self._phase("gradient.end", (loss, count, gradients))
+                self._phase("accumulation.begin")
                 old_loss, old_count, old_gradients, counts_valid = total
                 total = (
                     old_loss + loss,
@@ -147,6 +162,7 @@ class StreamingStep:
                     self.add(old_gradients, gradients),
                     counts_valid & jnp.isfinite(count) & (count >= 0),
                 )
+                self._phase("accumulation.end", total)
         if total is None:
             nan = jnp.float32(jnp.nan)
             return adamw.CommitResult(
@@ -161,10 +177,15 @@ class StreamingStep:
         loss, count, gradients, counts_valid = total
         valid = counts_valid & jnp.isfinite(count) & (count > 0)
         denominator = jnp.where(valid, count, jnp.float32(1))
+        self._phase("normalization.begin", (loss, denominator, valid))
         normalized = self.normalize(gradients, denominator)
-        return self.transition(
+        self._phase("normalization.end", normalized)
+        self._phase("optimizer.begin")
+        result = self.transition(
             full_state, normalized, loss / denominator, valid
         )
+        self._phase("optimizer.end", result)
+        return result
 
 
 def make_streaming_step(

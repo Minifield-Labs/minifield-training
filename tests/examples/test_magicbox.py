@@ -13,6 +13,7 @@ from examples.magicbox import bundle as magicbox_bundle
 from examples.magicbox import composition as magicbox
 from examples.magicbox import smoke
 from minifield_training.batching import schema_fields as batching
+from minifield_training.checkpoints import bundle as bundle_io
 from minifield_training.core import json_io
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.objectives import schema_fields as objective
@@ -31,8 +32,9 @@ def test_notebook_python_cells() -> None:
             assert not cell["outputs"] and cell["execution_count"] is None
 
 
+@pytest.mark.parametrize("version", (1, 2))
 def test_tiny_bundle_roundtrip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
 ) -> None:
     """A frozen synthetic encoder config exercises the real bundle loader."""
     cfg, fusion, parameters = smoke.tiny()
@@ -62,15 +64,36 @@ def test_tiny_bundle_roundtrip(
     (tokenizer / "tokenizer.json").write_text('{"synthetic":true}')
     (tokenizer / "contract.json").write_text('{"offset_policy":"synthetic"}')
     bundle = tmp_path / "bundle"
-    magicbox_bundle.save(
-        bundle,
-        parameters,
-        cfg,
-        fusion,
-        encoder_config=path,
-        tokenizer=tokenizer,
-        step=4,
-    )
+    if version == 1:
+        bundle_io.save(
+            bundle,
+            parameters,
+            magicbox.inventory(cfg, fusion, freeze_embeddings=False),
+            metadata={
+                "format": "minifield.magicbox.model/1",
+                "fusion": dataclasses.asdict(fusion),
+                "step": 4,
+                "source": dataclasses.asdict(encoder.SOURCE),
+                "decode": {"presence_threshold": 0.5, "confidence": None},
+            },
+            assets={
+                "encoder.json": path,
+                "tokenizer/tokenizer.json": tokenizer / "tokenizer.json",
+                "tokenizer/contract.json": tokenizer / "contract.json",
+            },
+            source_model=encoder.SOURCE.model_id,
+            source_revision=encoder.SOURCE.revision,
+        )
+    else:
+        magicbox_bundle.save(
+            bundle,
+            parameters,
+            cfg,
+            fusion,
+            encoder_config=path,
+            tokenizer=tokenizer,
+            step=4,
+        )
     restored_cfg, restored_fusion, restored, decode = magicbox_bundle.load(
         bundle
     )

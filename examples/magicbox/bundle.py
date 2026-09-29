@@ -60,7 +60,7 @@ def save(
         parameters,
         magicbox.inventory(cfg, fusion),
         metadata={
-            "format": "minifield.magicbox.model/1",
+            "format": "minifield.magicbox.model/2",
             "fusion": dataclasses.asdict(fusion),
             "step": step,
             "source": dataclasses.asdict(encoder.SOURCE),
@@ -80,9 +80,10 @@ def _configuration(
     directory: Path, metadata: dict[str, object]
 ) -> tuple[lfm.Config, model.Config]:
     """Interpret verified assets using the product's metadata contract."""
-    if metadata.get("format") != "minifield.magicbox.model/1" or metadata.get(
-        "source"
-    ) != dataclasses.asdict(encoder.SOURCE):
+    if metadata.get("format") not in (
+        "minifield.magicbox.model/1",
+        "minifield.magicbox.model/2",
+    ) or metadata.get("source") != dataclasses.asdict(encoder.SOURCE):
         raise ValueError("Unknown MagicBox bundle")
     files = json_io.object_map(metadata["files"])
     if files["encoder.json"] != encoder.SOURCE.config_sha256:
@@ -102,7 +103,9 @@ def load(
         directory,
         expected_files=_EXPECTED_FILES,
         inventory=lambda metadata: magicbox.inventory(
-            *_configuration(directory, metadata)
+            *_configuration(directory, metadata),
+            freeze_embeddings=metadata["format"]
+            == "minifield.magicbox.model/2",
         ),
     )
     cfg, fusion = _configuration(directory, metadata)

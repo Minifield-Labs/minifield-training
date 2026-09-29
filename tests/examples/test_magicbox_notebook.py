@@ -103,6 +103,7 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
         OUTPUT=tmp_path,
         current={},
         update=object(),
+        dataclasses=SimpleNamespace(replace=lambda value, **_kwargs: value),
         inventory=object(),
         stream=SimpleNamespace(updates_per_epoch=100),
         cursor=SimpleNamespace(next_batch=0),
@@ -112,6 +113,7 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
         diagnostics=SimpleNamespace(
             monitor=lambda *_args: contextlib.nullcontext()
         ),
+        training_state=SimpleNamespace(verify_roundtrip=lambda *_args: None),
         training_run=SimpleNamespace(
             run=run,
             RunConfig=lambda *args, **kwargs: SimpleNamespace(

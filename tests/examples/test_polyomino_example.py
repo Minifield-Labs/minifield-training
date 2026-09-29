@@ -251,12 +251,12 @@ def test_smoke_rejects_changed_checkpoint_tensor(tmp_path: Path) -> None:
         optimizer_id="adamw",
         cursor=cursor,
     )
-    train.verify_checkpoint_roundtrip(
+    training_state.verify_roundtrip(
         directory, current, cursor, inventory, "adamw"
     )
     current["params"]["weight"] = jnp.asarray([1.0, 3.0], dtype=jnp.float32)
     with pytest.raises(RuntimeError, match="params/weight"):
-        train.verify_checkpoint_roundtrip(
+        training_state.verify_roundtrip(
             directory, current, cursor, inventory, "adamw"
         )
 

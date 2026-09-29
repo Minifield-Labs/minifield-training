@@ -215,15 +215,29 @@ def validate_full_weight_state_structure(
     _validate_step_structure(full_state["step"])
 
 
+@jax.jit
+def _state_leaf_validity(
+    parameter: jax.Array, first_moment: jax.Array, second_moment: jax.Array
+) -> jax.Array:
+    """Reduce one shape's state checks before transferring three booleans."""
+    return jnp.stack(
+        (
+            jnp.all(jnp.isfinite(parameter)),
+            jnp.all(jnp.isfinite(first_moment)),
+            jnp.all(jnp.isfinite(second_moment) & (second_moment >= 0)),
+        )
+    )
+
+
 def validate_full_weight_state(
     full_state: state.State,
     inventory: core_parameters.FullParameterInventory,
 ) -> None:
     """Eagerly validate checkpoint/load state including finite master values.
 
-    This intentionally transfers leaves to the host. It belongs at explicit
-    initialization, restore, checkpoint, and export boundaries, never the
-    model-update hot path.
+    Shape-local device reductions transfer only three booleans per leaf.
+    Converting full arrays to NumPy would retain host copies of all masters
+    and moments on JAX arrays throughout later compilation and training.
     """
     validate_full_weight_state_structure(full_state, inventory)
     specs = _inventory_by_name(inventory)
@@ -231,14 +245,18 @@ def validate_full_weight_state(
     if step < 0 or step > _INT32_MAX:
         raise ValueError("Full-weight step is outside int32 range")
     for name in specs:
-        parameter = np.asarray(full_state["params"][name])
-        first_moment = np.asarray(full_state["m"][name])
-        second_moment = np.asarray(full_state["v"][name])
-        if not np.isfinite(parameter).all():
+        parameter_ok, first_ok, second_ok = np.asarray(
+            _state_leaf_validity(
+                full_state["params"][name],
+                full_state["m"][name],
+                full_state["v"][name],
+            )
+        )
+        if not parameter_ok:
             raise ValueError(f"Full-weight parameter is non-finite: {name}")
-        if not np.isfinite(first_moment).all():
+        if not first_ok:
             raise ValueError(f"Full-weight first moment is non-finite: {name}")
-        if not np.isfinite(second_moment).all() or np.any(second_moment < 0):
+        if not second_ok:
             raise ValueError(f"Full-weight second moment is invalid: {name}")
 
 

@@ -1,4 +1,4 @@
-"""Train all MagicBox parameters with exact optimizer and data-cursor resume."""
+"""Train the encoder and heads with frozen embeddings and exact resume."""
 
 import argparse
 import dataclasses
@@ -118,7 +118,7 @@ def main() -> None:
         "bf16": not args.fp32,
         "devices": args.devices,
         "contract": data.FORMAT,
-        "implementation": "magicbox-jax/1",
+        "implementation": "magicbox-jax/2-frozen-token-embeddings",
     }
     source_id = hashlib.sha256(json_io.canonical(identity).encode()).hexdigest()
     checkpoints = args.output / "checkpoints"

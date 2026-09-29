@@ -108,3 +108,10 @@ raises if the source ends early. Finite `examples` keep their seeded epoch
 behavior; passing both input modes is an error. The checkpoint cursor
 identifies the next unread update. Its data/source IDs must identify the
 source and deterministic settings as well as any stored inputs.
+
+For a diagnostic run, replace a streaming step's `report_phase` with a callback
+accepting a phase name. Gradient, accumulation, normalization, and optimizer
+begin/end markers synchronize pending results at their boundaries. The runner
+also identifies state validation and batch readiness. The default callback is
+absent, so normal training has no added synchronization. The TPU notebook
+enables these markers only for its two-update preflight.

@@ -42,6 +42,9 @@ Masters occupy 1,425,563,664 bytes before array/container overhead. Adam's
 two FP32 moment trees add twice that amount. Activations, gradients, optimizer
 temporaries, executable memory, and data buffers are separate allocations.
 No vocabulary-output matrix or second encoder parameter copy is created.
+The 67,108,864 token-embedding parameters are frozen, leaving 289,282,052
+trainable parameters. Frozen embeddings receive neither gradients nor decay.
+Their zero Adam moment slots remain allocated for checkpoint compatibility.
 
 ## Dataset contract
 
@@ -72,10 +75,10 @@ no labels.
 
 The notebook starts in `RUN_MODE = 'smoke'`. It runs up to 10 total updates of
 the full model, using 1 request per device, 1 microbatch, schema chunks of 1,
-and 8 validation records. Its first 2 updates save a checkpoint, which the
-next invocation reloads before continuing to the 10-update target. Rerunning
+and 8 validation records. Its first 2 updates save a checkpoint and verify its parameters, moments, step,
+and cursor against live state before continuing to the 10-update target. Rerunning
 an already completed smoke run adds no training updates. The inference cell
-reloads the exported bundle in a fresh process.
+reloads the exported bundle in the notebook kernel.
 
 `DEVICES = None` detects the runtime's visible TPU devices. An explicit count
 requires exactly that many devices on the same host. This supports a Colab
@@ -85,7 +88,7 @@ of 1 request per device. Both modes retain source and schema token limits.
 
 Set `RUN_MODE = 'full'` for these full-training defaults:
 
-- 3 epochs, all parameters trainable, including embeddings.
+- 3 epochs, frozen pretrained token embeddings; encoder trunk, fusion, and heads train.
 - All visible TPU devices, 1 request per device, 4 accumulated microbatches.
   On 8 devices this is 32 requests per logical update.
 - BF16 activations, FP32 losses, parameters, and optimizer state.
@@ -100,7 +103,8 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
 - Each session runs up to 8 hours. Rerunning resumes the next unread update.
 
 The recipe uses a constant learning rate. There is no warmup, scheduler,
-quantization, freezing stage, or automatic best-checkpoint selection.
+quantization or automatic best-checkpoint selection. Token embeddings remain
+frozen throughout the run.
 Validation reports contain per-type loss and field counts, extraction exact
 match/false-positive/false-null rates, choice accuracy, binary Brier score,
 and ordinal MAE. Exact extraction compares the dataset's canonical gold span.
@@ -140,10 +144,12 @@ once they have copied the desired inference artifact.
 
 ## Decoding and export
 
-`minifield.magicbox.model/1` bundles include weights, original encoder config,
+`minifield.magicbox.model/2` bundles include weights, original encoder config,
 fusion settings, tokenizer/offset contract, file hashes, and decode policy.
 `examples.magicbox.predict` reloads the bundle and emits typed JSON.
-It supports an empty questions map without running the model.
+It supports an empty questions map without running the model. The loader also
+accepts v1 bundles with their original all-trainable inventory. New checkpoints
+bind the frozen-embedding recipe and reject old all-trainable optimizer resumes.
 
 Choice uses a softmax within that field's candidates. Score returns the
 expected zero-based level and original rubric legend. Binary uses sigmoid.
@@ -167,10 +173,10 @@ candidate counts, row/request isolation, cache admission, partial labels,
 equal-type reduction, Unicode offsets, and bundle round trips. A randomized
 span test compares 600 short arrays with exhaustive enumeration.
 
-The tiny all-four-types example reduced loss from 0.896994 to 0.00092325 in
+The tiny all-four-types example reduced loss from 0.896994 to 0.00106434 in
 80 steps. Its saved checkpoint reproduced the next full optimizer state
 exactly. An eight-device CPU simulation matched the unsharded loss, mass,
-and gradients with maximum absolute difference 3.58e-7.
+and gradients with maximum absolute difference 5.96e-8.
 
 A synthetic Parquet round trip with the actual pinned native tokenizer
 verified Unicode gold alignment, omission of an over-length unlabeled
@@ -235,3 +241,6 @@ The direct-kernel notebook exposes the failure stages; it does not establish
 that the TPU compiler memory problem is resolved. Python 3.13 passed 11 selected
 CPU tests covering notebook syntax, tiny optimization, exact checkpoint resume,
 bundle reload, the schema-field strategy, and host-memory monitoring.
+
+The [Polyomino comparison](../examples/magicbox/training-audit.md) records the
+frozen-embedding correction, validation transfers, and remaining compiler limits.

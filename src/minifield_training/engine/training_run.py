@@ -171,7 +171,14 @@ def run[RecordT](
     updates_per_epoch = _epoch_update_count(
         examples, batch_strategy, batch_source
     )
+    phase = (
+        update.report_phase if isinstance(update, step.StreamingStep) else None
+    )
+    if phase is not None:
+        phase("state_validation.begin")
     adamw.validate_full_weight_state(initial_state, inventory)
+    if phase is not None:
+        phase("state_validation.end")
     if int(initial_state["step"]) != cursor.next_batch:
         raise ValueError("Optimizer step and data cursor disagree")
     compiled = (
@@ -212,6 +219,8 @@ def run[RecordT](
                 assert source_batches is not None
                 batches = source_batches
             for batch in batches:
+                if phase is not None:
+                    phase("batch.ready")
                 if (
                     deadline is not None
                     and committed > 0

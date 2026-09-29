@@ -11,7 +11,8 @@ The kernel must run Python 3.12 or 3.13; dependencies install into that kernel. 
 publish its commit and update `SOURCE_REVISION` to that full commit SHA.
 
 The notebook defaults to `RUN_MODE = 'smoke'`: 10 updates of the full pretrained
-model, checkpoint saving, 8-record validation, and inference export/reload. It
+model, checkpoint saving and full-state reload verification, 8-record validation,
+and inference export/reload. It
 detects all TPU devices on one host. A single-device runtime uses 1 request,
 1 microbatch, and schema chunks of 1. Set `DEVICES = 1` to require that topology.
 
@@ -24,7 +25,8 @@ resume requires the same device count and batch settings.
 By default, both modes download `protodotdesign/magicbox-v1` at revision
 `f074bb549f16ea091fd8ece12e79652b8082871f`. Set `DATASET` to a completed local
 directory to use an attached dataset. Both modes keep the dataset's full
-source/schema token limits and train every parameter.
+source/schema token limits and freeze the pretrained token embeddings while
+training the remaining 289,282,052 parameters.
 
 Local offline optimization and checkpoint check:
 
@@ -79,3 +81,6 @@ No sibling source tree is imported.
 
 Architecture, recipe, metrics, and verification details are in
 [the training guide](../../docs/magicbox.md).
+
+The [training comparison](training-audit.md) records the Polyomino recipe audit,
+confirmed omissions, and local compiler evidence.

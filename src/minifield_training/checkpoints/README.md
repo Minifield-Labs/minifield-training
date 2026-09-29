@@ -69,3 +69,9 @@ identity instead of filtering them out. Discovery does structural selection;
 `training_state.load` still verifies persisted tensors and full compatibility.
 `tests/checkpoints/test_discovery.py` covers numerical ordering, incomplete
 and foreign checkpoints, and cursor/path ambiguity without model imports.
+
+`training_state.verify_roundtrip` restores a checkpoint on CPU and compares
+parameters, both Adam moment trees, step, and cursor against live state exactly.
+The Polyomino verification option and MagicBox notebook preflight share this
+check. It runs at an explicit smoke boundary and needs host memory for the
+restored state; it isn't part of each optimizer update.

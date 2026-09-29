@@ -11,6 +11,10 @@ diagnostics. Both take inventory metadata from `core.parameters`; nothing
 here knows a model family.
 Second moments use one per-leaf device reduction for finite and nonnegative
 values in both incoming-state and candidate checks.
+Eager state validation reduces each shape on device and transfers three
+booleans per leaf. It preserves named rejection errors without materializing
+NumPy copies of every master and moment tensor. The shape-local validation
+kernel is cached across initialization, resume, and checkpoint boundaries.
 
 Build metadata with `core.parameters.build_inventory(..., decayed_names=...)`.
 AdamW applies decay exactly where the inventory's `decayed` flag is true;
