@@ -111,9 +111,21 @@ def bind_pointer(
     """Bind the selected encoder to the joint pointer model."""
 
     def encode(
-        params: types.Parameters, ids: jax.Array, mask: jax.Array
+        params: types.Parameters,
+        ids: jax.Array,
+        mask: jax.Array,
+        segment_ids: jax.Array,
+        positions: jax.Array,
     ) -> jax.Array:
-        return encoder.encode(params, cfg, ids, mask, bf16=bf16)
+        return encoder.encode(
+            params,
+            cfg,
+            ids,
+            mask,
+            bf16=bf16,
+            segment_ids=segment_ids,
+            positions=positions,
+        )
 
     def apply(
         params: types.Parameters, batch: types.DeviceBatch

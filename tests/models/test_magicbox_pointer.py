@@ -18,16 +18,25 @@ def test_logits_are_scaled_query_key_products() -> None:
     rng = np.random.default_rng(1)
     hidden = rng.normal(size=(2, 5, 6)).astype(np.float32)
 
+    segments = jnp.asarray([[1, 1, 2, 2, 2], [1, 1, 1, 1, 0]])
+
     def encode(
-        weights: types.Parameters, ids: jax.Array, mask: jax.Array
+        weights: types.Parameters,
+        ids: jax.Array,
+        mask: jax.Array,
+        segment_ids: jax.Array,
+        positions: jax.Array,
     ) -> jax.Array:
-        del weights, mask
+        del weights, mask, positions
         assert ids.shape == (2, 5)
+        np.testing.assert_array_equal(segment_ids, segments)
         return jnp.asarray(hidden)
 
     batch = {
         "input_ids": jnp.zeros((2, 5), jnp.int32),
         "input_mask": jnp.ones((2, 5), jnp.int32),
+        "segment_ids": segments,
+        "positions": jnp.asarray([[0, 1, 0, 1, 2], [0, 1, 2, 3, 0]]),
         "query_index": jnp.asarray([[0, 3], [4, 1]]),
     }
     outputs = pointer.forward(params, cfg, encode, batch)
@@ -50,9 +59,17 @@ def test_rejects_misaligned_queries() -> None:
     batch = {
         "input_ids": jnp.zeros((2, 5), jnp.int32),
         "input_mask": jnp.ones((2, 5), jnp.int32),
+        "segment_ids": jnp.ones((2, 5), jnp.int32),
+        "positions": jnp.zeros((2, 5), jnp.int32),
         "query_index": jnp.zeros((3, 2), jnp.int32),
     }
     with pytest.raises(ValueError, match="query positions"):
         pointer.forward(
-            params, cfg, lambda weights, ids, mask: ids.astype(float), batch
+            params, cfg, lambda weights, ids, *_: ids.astype(float), batch
+        )
+    batch["query_index"] = jnp.zeros((2, 2), jnp.int32)
+    batch["segment_ids"] = jnp.ones((2, 4), jnp.int32)
+    with pytest.raises(ValueError, match="joint sequence"):
+        pointer.forward(
+            params, cfg, lambda weights, ids, *_: ids.astype(float), batch
         )

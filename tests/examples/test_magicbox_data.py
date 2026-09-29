@@ -1,6 +1,7 @@
 """CPU schema admission and private-label separation contracts."""
 
 import dataclasses
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -16,9 +17,11 @@ from examples.magicbox import data as magicbox
 from examples.magicbox import smoke
 from examples.magicbox import source
 from examples.magicbox import tokenizer
+from minifield_training.batching import pointer as pointer_batching
 from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
+from minifield_training.datasets import pointer
 from minifield_training.objectives import schema_fields as objective
 
 
@@ -225,3 +228,49 @@ def test_corpus_measures_packed_sequences_across_splits() -> None:
     # 11, plus 7 source tokens. The extract-only record has 5 + 7 + 7.
     assert corpus.pointer_extent(("train",)) == (60, 2)
     assert corpus.pointer_extent(("validation",)) == (19, 1)
+    assert corpus.pointer_sizes("train") == [(19, 1), (60, 2)]
+    _check_planned_stream(corpus)
+
+
+def _check_planned_stream(corpus: source.Corpus) -> None:
+    """Both train records pack into 1 row per epoch and resume exactly."""
+
+    def compile_record(raw: object) -> pointer.Record:
+        """Stand in for real compilation with a small valid choice record."""
+        targets = json_io.object_map(raw)["targets_json"]
+        return pointer.Record(
+            hashlib.sha256(str(targets).encode()).hexdigest()[:8],
+            "x",
+            fields.Encoding((1, 5), ((0, 0), (0, 1)), (True, False)),
+            (
+                pointer.Question(
+                    "q",
+                    fields.Kind.CHOICE,
+                    (1, 7),
+                    (pointer.Option("a", (1, 8)), pointer.Option("b", (1, 9))),
+                    (1.0, 0.0),
+                    True,
+                ),
+            ),
+        )
+
+    batches = pointer_batching.PointerBatchStrategy(
+        pointer_batching.Shape(1, 2, 128, 4, 128, 0), objective.balance_types
+    )
+    planned = source.planned_training_stream(
+        corpus,
+        batches,
+        corpus.pointer_sizes("train"),
+        3,
+        2,
+        compile_record,
+        prefetch=1,
+    )
+    assert planned.total_updates == 2
+    updates = list(planned(0))
+    assert [len(update.example_ids) for update in updates] == [2, 2]
+    # One packed row per update leaves the second row slot as padding.
+    assert not np.asarray(updates[0].microbatches["input_mask"])[0, 1].any()
+    assert [update.example_ids for update in planned(1)] == [
+        updates[1].example_ids
+    ]

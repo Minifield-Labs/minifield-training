@@ -189,7 +189,8 @@ def build(
         arrays,
         weighting,
         microbatches=shape.microbatches,
-        requests=shape.requests,
+        slots=shape.requests,
+        filled=len(records),
         example_ids=tuple(record.id for record in records),
         allow_unsupervised=allow_unsupervised,
     )
@@ -200,7 +201,8 @@ def weighted_update(
     weighting: Callable[[Sequence[int]], Sequence[float]],
     *,
     microbatches: int,
-    requests: int,
+    slots: int,
+    filled: int,
     example_ids: tuple[str, ...],
     allow_unsupervised: bool,
 ) -> contracts.PhysicalUpdate:
@@ -208,6 +210,8 @@ def weighted_update(
 
     ``arrays`` holds ``field_weight`` (1 for labeled fields) and ``kind``.
     The caller's weighting runs once, before physical microbatch slicing.
+    ``filled`` of the ``microbatches * slots`` physical slots hold data, in
+    microbatch-major order; later microbatches are inactive.
     """
     labeled = arrays["field_weight"].astype(bool)
     weights = np.asarray(
@@ -225,7 +229,7 @@ def weighted_update(
     # Host arrays are accepted by the engine and transferred one microbatch
     # at a time; retaining the complete dataset on accelerators is unnecessary.
     batch: types.DeviceBatch = arrays  # type: ignore[assignment]
-    active = np.arange(microbatches) < math.ceil(len(example_ids) / requests)
+    active = np.arange(microbatches) < math.ceil(filled / slots)
     return contracts.PhysicalUpdate(batch, active, example_ids)
 
 

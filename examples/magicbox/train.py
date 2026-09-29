@@ -15,9 +15,11 @@ from examples.magicbox import composition as magicbox
 from examples.magicbox import data
 from examples.magicbox import source
 from minifield_training.batching import pointer as batching
+from minifield_training.batching import stream as streams
 from minifield_training.checkpoints import discovery
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
+from minifield_training.datasets import pointer as pointer_records
 from minifield_training.engine import training_run
 from minifield_training.evaluation import pointer as evaluate_pointer
 from minifield_training.evaluation import schema_fields as evaluate
@@ -26,6 +28,7 @@ from minifield_training.models.magicbox import pointer
 from minifield_training.objectives import pointer as objective
 from minifield_training.objectives import schema_fields as weighting
 from minifield_training.optimizers import adamw
+from minifield_training.optimizers import optax_adamw
 from minifield_training.strategies import pretrained
 from minifield_training.strategies import schema_fields as strategy
 
@@ -37,7 +40,13 @@ def arguments() -> argparse.Namespace:
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--devices", type=int, default=8)
     parser.add_argument("--platform", choices=("cpu", "tpu"), default="tpu")
-    parser.add_argument("--requests", type=int, default=8)
+    parser.add_argument("--rows", type=int, default=8)
+    parser.add_argument("--questions-per-row", type=int, default=32)
+    parser.add_argument("--no-pack", action="store_true")
+    parser.add_argument("--prefetch", type=int, default=2)
+    parser.add_argument(
+        "--optimizer", choices=("optax", "transactional"), default="optax"
+    )
     parser.add_argument("--microbatches", type=int, default=4)
     # Joint sequence tokens and questions per request; omitted means measure
     # every split and round tokens up to a multiple of 128.
@@ -64,7 +73,7 @@ def main() -> None:
     args = arguments()
     devices = training_run.require_devices(args.devices, args.platform)
     if (
-        args.requests % args.devices
+        args.rows % args.devices
         or args.epochs < 1
         or args.validation_records < 1
         or args.final_records < 0
@@ -92,26 +101,49 @@ def main() -> None:
     )
     shape = batching.Shape(
         args.microbatches,
-        args.requests,
+        args.rows,
         args.sequence_tokens or -(-tokens // 128) * 128,
-        args.questions or questions,
+        args.questions
+        or (questions if args.no_pack else args.questions_per_row),
         cfg.vocab_size,
         0,
     )
     if shape.sequence_tokens > encoder.MAX_SEQUENCE_LENGTH:
         raise ValueError("Requested tokens exceed the encoder context")
     batches = batching.PointerBatchStrategy(shape, weighting.balance_types)
-    stream = source.training_stream(
-        corpus,
-        batches,
-        args.seed,
-        args.epochs,
-        functools.partial(
-            corpus.compile_pointer, split="train", score_width=args.score_width
-        ),
+    compile_train = functools.partial(
+        corpus.compile_pointer, split="train", score_width=args.score_width
+    )
+    stream: (
+        streams.EpochStream[object, pointer_records.Record]
+        | streams.PlannedStream[object, pointer_records.Record]
+    ) = (
+        source.training_stream(
+            corpus,
+            batches,
+            args.seed,
+            args.epochs,
+            compile_train,
+            prefetch=args.prefetch,
+        )
+        if args.no_pack
+        else source.planned_training_stream(
+            corpus,
+            batches,
+            corpus.pointer_sizes("train"),
+            args.seed,
+            args.epochs,
+            compile_train,
+            prefetch=args.prefetch,
+        )
     )
     inventory = magicbox.pointer_inventory(cfg, head)
     optimizer = adamw.AdamWConfig(learning_rate=args.learning_rate)
+    optimizer_id = (
+        optax_adamw.implementation_identity(optimizer)
+        if args.optimizer == "optax"
+        else optimizer.implementation_identity
+    )
     identity = {
         "source": dataclasses.asdict(encoder.SOURCE),
         "encoder": dataclasses.asdict(cfg),
@@ -127,6 +159,12 @@ def main() -> None:
         "contract": data.FORMAT,
         "template": data.POINTER_TEMPLATE,
         "score_width": args.score_width,
+        "packing": {
+            "pack": not args.no_pack,
+            "planner": "first-fit/1",
+            "open_limit": 64,
+            "close_below": 0.05,
+        },
         "implementation": "magicbox-pointer-jax/1",
     }
     source_id = hashlib.sha256(json_io.canonical(identity).encode()).hexdigest()
@@ -144,7 +182,7 @@ def main() -> None:
         current, cursor = training_state.load(
             resume,
             inventory,
-            optimizer_id=optimizer.implementation_identity,
+            optimizer_id=optimizer_id,
             run_id=args.run_id,
             data_sha256=corpus.identity,
             source_id=source_id,
@@ -168,7 +206,7 @@ def main() -> None:
                 "optimizer": dataclasses.asdict(optimizer),
                 "data_sha256": corpus.identity,
                 "source_id": source_id,
-                "updates_per_epoch": stream.updates_per_epoch,
+                "total_updates": stream.total_updates,
             },
             indent=2,
         )
@@ -181,7 +219,7 @@ def main() -> None:
         names=data.KINDS,
         metrics=evaluate_pointer.Metrics,
     )
-    remaining = args.epochs * stream.updates_per_epoch - cursor.next_batch
+    remaining = stream.total_updates - cursor.next_batch
     if args.max_steps is not None:
         remaining = min(remaining, args.max_steps)
     if remaining > 0 and not args.evaluate_only:
@@ -198,6 +236,11 @@ def main() -> None:
             optimizer,
             mesh=mesh,
             terms=objective.terms,
+            transaction=(
+                optax_adamw.make_transaction
+                if args.optimizer == "optax"
+                else adamw.make_transaction
+            ),
         )
         with (args.output / "progress.jsonl").open(
             "a", encoding="utf-8"
@@ -216,7 +259,7 @@ def main() -> None:
                 inventory,
                 run_config,
                 checkpoint_root=checkpoints,
-                optimizer_id=optimizer.implementation_identity,
+                optimizer_id=optimizer_id,
                 cursor=cursor,
                 evaluate=evaluator.callback(
                     args.output / "metrics", args.validation_records
@@ -226,7 +269,7 @@ def main() -> None:
                 batch_source=stream,
                 strict_compiles=True,
             )
-    completed = cursor.next_batch >= args.epochs * stream.updates_per_epoch
+    completed = cursor.next_batch >= stream.total_updates
     if completed or args.evaluate_only:
         for split in ("validation", "calibration", "test", "ood"):
             if any(shard["split"] == split for shard in corpus.shards):
@@ -237,7 +280,8 @@ def main() -> None:
                     json.dumps(metrics, indent=2)
                 )
                 print(json.dumps({"split": split, **metrics}), flush=True)
-    bundle = args.output / f"bundle-{cursor.next_batch:08d}"
+    # The run identity keeps bundles from other settings in one output apart.
+    bundle = args.output / f"bundle-{source_id[:12]}-{cursor.next_batch:08d}"
     if not bundle.exists():
         magicbox_bundle.save_pointer(
             bundle,

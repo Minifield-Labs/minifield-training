@@ -74,6 +74,24 @@ Packed consumers need segment-aware kernels: `kernels.bidirectional` for
 encoders and the packed causal kernels for decoders. Schema batches pack their
 encoder inputs; dense record batches still pad one record per row.
 
+`packing.plan_rows(sizes, capacity)` groups whole items into rows by online
+first-fit in the given order. Each item has one size per capacity dimension,
+such as tokens and questions, and joins the first open row with room in every
+dimension. A row closes once any dimension has less than `close_below` (5%) of
+its capacity free. At `open_limit` (64) open rows, the fullest one closes
+before another opens, which bounds how far an item lands from its position.
+`packing.plan_updates(sizes, capacity, rows_per_update, seed=...)` shuffles by
+`seed`, plans rows in that order, and groups them into updates of
+`rows_per_update` rows. Every item appears once, and the plan depends only on
+the inputs, so a run replays it from `seed + epoch` instead of saving it.
+
+```python
+updates = packing.plan_updates(
+    [(900, 2), (1000, 4), (500, 1), (1700, 3)], (1792, 32), 2, seed=17
+)
+# [[[0, 2], [1]], [[3]]]: requests 0 and 2 share a row; 2 rows per update.
+```
+
 ## Schema-conditioned batches
 
 `schema_fields.SchemaBatchStrategy` implements the same `BatchStrategy`
@@ -114,15 +132,33 @@ it while retaining their own Arrow or NumPy shuffle policy. Independent tests
 verify exact replay and an unrelated schema consumer with different padding,
 vocabulary, context length, and loss weights.
 
+`stream.PlannedStream` replays a per-epoch plan of packed rows, such as
+`plan_updates` output. `plan(epoch)` must return the same plan on every call.
+Updates per epoch can vary, so `total_updates` sums every epoch's plan, and
+the global update cursor resumes inside whichever epoch it lands in. Only
+planned records are read and compiled, one update at a time. `pack(rows,
+update)` receives compiled records grouped by row.
+
+Both streams take `prefetch`, the number of updates to prepare ahead on a
+background thread (`stream.Prefetch`). Order and resume are unchanged; source
+errors re-raise on the consuming thread, and `close()` stops the producer.
+
 ## Joint pointer batches
 
 `pointer.PointerBatchStrategy` lays each request out as one sequence: every
 question's query, then its options, then the source (`pointer.layout`). Shape
-`[M, R, sequence_tokens]` holds `input_ids` and `input_mask`; per question
-(`[M, R, questions]`) it holds `query_index`, `kind`, and `field_weight`; and
-`[M, R, questions, sequence_tokens]` holds `allowed`, `start_target`, and
-`end_target`. Option questions may point only at their option markers.
-Extraction may point at selectable source tokens or its "not stated" marker.
-Every shape is fixed, so the training step compiles once. Overflow raises.
+`[M, R, sequence_tokens]` holds `input_ids`, `input_mask`, `segment_ids`, and
+`positions`; per question (`[M, R, questions]`) it holds `query_index`, `kind`,
+and `field_weight`; and `[M, R, questions, sequence_tokens]` holds `allowed`,
+`start_target`, and `end_target`. Option questions may point only at their
+option markers. Extraction may point at selectable source tokens or its "not
+stated" marker. Every shape is fixed, so the training step compiles once.
+Overflow raises.
+
+A row can hold several whole requests back to back (`pointer.build_rows`, or
+`pack_rows` for a planned stream). Each request gets its own segment ID, from
+1, and positions restarting at 0, and its questions take consecutive question
+slots. With a segment-aware encoder, a packed request's losses match the same
+request alone in a row. `pack` and `build` keep one request per row.
 `schema_fields.weighted_update` applies the caller's type weighting for both
 schema and pointer batches.

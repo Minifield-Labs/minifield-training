@@ -17,14 +17,21 @@ publish its commit and update `SOURCE_REVISION` to that full commit SHA.
 The notebook defaults to `RUN_MODE = 'smoke'`: 10 updates of the full pretrained
 model, checkpoint saving and full-state reload verification, 8-record validation,
 and inference export/reload. It
-detects all TPU devices on one host. A single-device runtime uses 1 request,
-1 microbatch. Set `DEVICES = 1` to require that topology.
+detects all TPU devices on one host. `ROWS_PER_DEVICE = 4` sets the rows each
+device takes per update. Set `DEVICES = 1` to require a single device.
 
-On the larger runtime, set `RUN_MODE = 'full'`. With 8 devices, its defaults
-are 8 requests per microbatch and 4 microbatches. Set
-`DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate
-output folders; full mode starts from pretrained weights. Exact optimizer
-resume requires the same device count, batch settings, and fixed-shape policy.
+On the larger runtime, set `RUN_MODE = 'full'`, which accumulates 4
+microbatches per update. Set `DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate output folders; full mode
+starts from pretrained weights. Exact optimizer resume requires the same device
+count, batch settings, and packing settings.
+
+With `PACK = True`, each row holds as many whole requests as fit in
+`SEQUENCE_TOKENS` tokens and `QUESTIONS_PER_ROW` questions. Every epoch gets a
+fresh seeded plan, built before training starts, so a resumed run replays the
+same updates. Updates per epoch vary with the plan; the notebook prints the
+count and how full the rows are. `PACK = False` restores 1 request per row.
+`PREFETCH = 2` prepares 2 updates ahead on a background thread, and progress
+reports include `batch_wait_seconds`.
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
 `f074bb549f16ea091fd8ece12e79652b8082871f`. Set `DATASET` to a completed local
@@ -63,7 +70,7 @@ python -m examples.magicbox.train \
 ```
 
 For a bounded single-device run, use a separate output directory with
-`--devices 1 --requests 1 --microbatches 1 --row-chunk 1 --max-steps 10
+`--devices 1 --rows 4 --microbatches 1 --max-steps 10
 --validation-records 8 --final-records 8`. The CLI's `--max-steps` bounds new
 updates per invocation; the notebook caps smoke mode at 10 total updates
 across repeated invocations.

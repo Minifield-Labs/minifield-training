@@ -13,6 +13,7 @@ from examples.magicbox import tokenizer
 from minifield_training.artifacts import files
 from minifield_training.batching import contracts
 from minifield_training.batching import packing
+from minifield_training.batching import pointer as pointer_batching
 from minifield_training.batching import stream
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
@@ -210,6 +211,19 @@ class Corpus:
             default=0,
         )
 
+    def pointer_sizes(self, split: str) -> list[tuple[int, int]]:
+        """Return each record's joint tokens and labeled questions, in order.
+
+        Sizes follow the split's stored row order, which planned packing
+        indexes directly.
+        """
+        return [
+            (source + sum(lengths), labeled)
+            for source, labeled, lengths in self._token_counts(
+                (split,), magicbox.labeled_pointer_texts
+            )
+        ]
+
     def pointer_extent(self, splits: Sequence[str]) -> tuple[int, int]:
         """Return the longest joint sequence and most questions per record."""
         tokens, questions = 0, 0
@@ -255,6 +269,8 @@ def training_stream[RecordT](
     seed: int,
     epochs: int,
     compile_record: Callable[[object], RecordT],
+    *,
+    prefetch: int = 0,
 ) -> stream.EpochStream[object, RecordT]:
     """Bind the published Arrow order and a record compiler to cursor replay."""
     data = corpus.split("train")
@@ -274,4 +290,45 @@ def training_stream[RecordT](
         pack=lambda records, update: batches.pack(
             records, seed=seed, update=update
         ),
+        prefetch=prefetch,
+    )
+
+
+def planned_training_stream(
+    corpus: Corpus,
+    batches: pointer_batching.PointerBatchStrategy,
+    sizes: Sequence[tuple[int, int]],
+    seed: int,
+    epochs: int,
+    compile_record: Callable[[object], pointer.Record],
+    *,
+    prefetch: int = 2,
+    open_limit: int = 64,
+    close_below: float = 0.05,
+) -> stream.PlannedStream[object, pointer.Record]:
+    """Pack whole training requests into each update's fixed rows.
+
+    Each epoch shuffles by ``seed + epoch`` and packs requests by online
+    first-fit within the row's token and question capacity, so the plan and
+    the resume cursor are deterministic. ``sizes`` come from
+    ``Corpus.pointer_sizes("train")``.
+    """
+    data = corpus.split("train")
+    if len(sizes) != len(data):
+        raise ValueError("Packing sizes don't match the training split")
+    shape = batches.shape
+    return stream.PlannedStream(
+        epochs=epochs,
+        plan=lambda epoch: packing.plan_updates(
+            sizes,
+            (shape.sequence_tokens, shape.questions),
+            shape.capacity,
+            seed=seed + epoch,
+            open_limit=open_limit,
+            close_below=close_below,
+        ),
+        read=lambda index: data[index],
+        compile_record=compile_record,
+        pack=batches.pack_rows,
+        prefetch=prefetch,
     )

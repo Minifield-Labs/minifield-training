@@ -16,7 +16,11 @@ import jax.numpy as jnp
 from minifield_training.kernels import linear
 from minifield_training.kernels import types
 
-type Encoder = Callable[[types.Parameters, jax.Array, jax.Array], jax.Array]
+# encode(params, ids, mask, segment_ids, positions): each row may hold several
+# requests; segment IDs (0 for padding) and restarting positions isolate them.
+type Encoder = Callable[
+    [types.Parameters, jax.Array, jax.Array, jax.Array, jax.Array], jax.Array
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,18 +67,28 @@ def forward(
 ) -> types.DeviceBatch:
     """Return FP32 ``[requests, questions, tokens]`` start and end logits.
 
-    Queries are the encoder states at each question's marker token. Masking
-    to allowed tokens belongs to the objective and decoder.
+    Queries are the encoder states at each question's marker token. A row may
+    hold several requests as separate segments; masking each question to its
+    own request's allowed tokens belongs to the objective and decoder.
     """
     ids, queries = batch["input_ids"], batch["query_index"]
     if (
         ids.ndim != 2
-        or batch["input_mask"].shape != ids.shape
+        or any(
+            batch[name].shape != ids.shape
+            for name in ("input_mask", "segment_ids", "positions")
+        )
         or queries.ndim != 2
         or queries.shape[0] != ids.shape[0]
     ):
         raise ValueError("Inconsistent joint sequence or query positions")
-    hidden = encode(parameters, ids, batch["input_mask"]).astype(jnp.float32)
+    hidden = encode(
+        parameters,
+        ids,
+        batch["input_mask"],
+        batch["segment_ids"],
+        batch["positions"],
+    ).astype(jnp.float32)
     asked = jnp.take_along_axis(hidden, queries[..., None], axis=1)
     params = types.slice_parameters(parameters, "magicbox.pointer.")
     scale = 1 / math.sqrt(cfg.pointer_width)

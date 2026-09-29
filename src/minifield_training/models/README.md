@@ -70,8 +70,12 @@ reads each request's questions, options, and source together. Every question
 answers by pointing: start and end query/key projections score every token of
 its request, and the objective masks them to the question's allowed tokens.
 There are no per-type heads, fusion blocks, dropout, or per-row loops.
-`pointer.forward` returns FP32 `[requests, questions, tokens]` start and end
+`pointer.forward` returns FP32 `[rows, questions, tokens]` start and end
 logits. A CPU test compares them with an independent NumPy computation.
+A row may pack several requests: the batch's `segment_ids` and `positions`
+reach the encoder, and each question's allowed tokens stay inside its own
+request. A CPU test checks that packed requests match separate rows in
+losses, allowed logits, and gradients.
 
 `magicbox.cache.SchemaCache` caches pre-projection schema token outputs for
 inference. Call `get` before JIT tracing, supplying tokenizer, template, and

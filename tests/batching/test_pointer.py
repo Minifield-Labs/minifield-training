@@ -138,3 +138,62 @@ def test_strategy_visits_each_record_once() -> None:
     assert sorted(seen) == ["0", "1", "2"]
     resumed = list(strategy.iter_updates(records, seed=5, start_update=1))
     assert resumed[0].example_ids == updates[1].example_ids
+
+
+def test_packed_row_isolates_each_request() -> None:
+    """2 requests share a row as segments 1 and 2 with their own targets."""
+    shape = batching.Shape(1, 2, 48, 8, 16, 0)
+    update = batching.build_rows(
+        [[_record("a"), _record("b")]], shape, weighting=_weights
+    )
+    arrays = {
+        key: np.asarray(value) for key, value in update.microbatches.items()
+    }
+    assert update.example_ids == ("a", "b")
+    # 1 filled row of 2 in the only microbatch keeps it active.
+    assert update.active.tolist() == [True]
+    np.testing.assert_array_equal(
+        arrays["segment_ids"][0, 0], [1] * 21 + [2] * 21 + [0] * 6
+    )
+    np.testing.assert_array_equal(
+        arrays["positions"][0, 0], [*range(21), *range(21), *[0] * 6]
+    )
+    # The second request's layout is the first's, shifted by 21 tokens.
+    np.testing.assert_array_equal(
+        arrays["query_index"][0, 0], [0, 4, 11, 21, 25, 32, 0, 0]
+    )
+    np.testing.assert_array_equal(
+        np.flatnonzero(arrays["allowed"][0, 0, 3]), [23, 39, 40]
+    )
+    np.testing.assert_array_equal(
+        np.flatnonzero(arrays["start_target"][0, 0, 3]), [39]
+    )
+    np.testing.assert_array_equal(
+        np.flatnonzero(arrays["allowed"][0, 0, 4]), [28, 30]
+    )
+    np.testing.assert_array_equal(
+        arrays["field_weight"][0, 0], [1, 2, 0, 1, 2, 0, 0, 0]
+    )
+    assert not arrays["input_mask"][0, 1].any()
+
+
+def test_packed_row_overflow_and_duplicates_raise() -> None:
+    """Too many questions or tokens in a row, or a repeated ID, fails."""
+    with pytest.raises(ValueError, match="exceeds configured batch shape"):
+        batching.build_rows(
+            [[_record("a"), _record("b")]],
+            batching.Shape(1, 1, 48, 5, 16, 0),
+            weighting=_weights,
+        )
+    with pytest.raises(ValueError, match="exceeds configured batch shape"):
+        batching.build_rows(
+            [[_record("a"), _record("b")]],
+            batching.Shape(1, 1, 40, 8, 16, 0),
+            weighting=_weights,
+        )
+    with pytest.raises(ValueError, match="Duplicate example ID"):
+        batching.build_rows(
+            [[_record("a")], [_record("a")]],
+            batching.Shape(1, 2, 48, 8, 16, 0),
+            weighting=_weights,
+        )

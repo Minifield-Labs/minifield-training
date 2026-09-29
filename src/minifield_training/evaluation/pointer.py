@@ -129,7 +129,7 @@ class Predictor(schema_fields.SingleRequest):
     ):
         super().__init__(forward, objective.losses)
         self.batches = batching.PointerBatchStrategy(
-            dataclasses.replace(batches.shape, microbatches=1, requests=1),
+            dataclasses.replace(batches.shape, microbatches=1, rows=1),
             batches.weighting,
         )
         self.presence_threshold = presence_threshold

@@ -1,5 +1,6 @@
 """End-to-end joint pointer MagicBox: compile, train, decode, and format."""
 
+from collections.abc import Callable
 import dataclasses
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from examples.magicbox import bundle as magicbox_bundle
 from examples.magicbox import composition as magicbox
 from examples.magicbox import data
 from examples.magicbox import smoke
+from minifield_training.batching import contracts
 from minifield_training.batching import pointer as batching
 from minifield_training.core import json_io
 from minifield_training.datasets import pointer
@@ -206,3 +208,100 @@ def test_pointer_bundle_roundtrip(
         np.testing.assert_array_equal(forward(restored, batch)[end], expected)
     with pytest.raises(ValueError, match="Unknown MagicBox bundle"):
         magicbox_bundle.load(bundle)
+
+
+def _tiny_pointer() -> tuple[
+    model.Config,
+    dict[str, jax.Array],
+    Callable[
+        [dict[str, jax.Array], dict[str, jax.Array]], dict[str, jax.Array]
+    ],
+]:
+    """Tiny real encoder plus pointer projections, computed in FP32."""
+    cfg, _, encoder_params = smoke.tiny()
+    head = model.Config(encoder_width=cfg.hidden_size, pointer_width=8)
+    params = {
+        name: value
+        for name, value in encoder_params.items()
+        if name.startswith("lfm2.")
+    }
+    params.update(model.initialize(head, jax.random.PRNGKey(3)))
+    return head, params, magicbox.bind_pointer(cfg, head, bf16=False)
+
+
+def test_packed_requests_match_separate_rows() -> None:
+    """Packing changes no question's logits, loss, or any parameter gradient."""
+    first = _record()
+    second = data.compile_pointer_record(
+        "second",
+        {
+            "state": "Bo paid 5 dollars.",
+            "questions": {
+                "payer": {"type": "extract", "instructions": "Who paid?"},
+                "paid": {"type": "noul", "instructions": "Was it paid?"},
+            },
+        },
+        {
+            "payer": {"has_answer": True, "span": [0, 2], "text": "Bo"},
+            "paid": {"probability": 0.8},
+        },
+        smoke.toy_encode,
+    )
+    length = max(first.sequence_tokens, second.sequence_tokens)
+    separate = batching.build(
+        [first, second],
+        batching.Shape(1, 2, length, 5, 128, 0),
+        weighting=weighting.balance_types,
+    )
+    packed = batching.build_rows(
+        [[first, second]],
+        batching.Shape(1, 1, 2 * length, 10, 128, 0),
+        weighting=weighting.balance_types,
+    )
+    _, params, forward = _tiny_pointer()
+    alone_batch, together_batch = _device(separate), _device(packed)
+    alone = forward(params, alone_batch)
+    together = forward(params, together_batch)
+    alone_losses = np.asarray(objective.losses(alone, alone_batch))
+    together_losses = np.asarray(objective.losses(together, together_batch))
+    # Question j of request r is slot j of row r alone, and slot 5 * r + j
+    # of the packed row, since the first request has 5 questions.
+    for row, record in enumerate((first, second)):
+        for question in range(len(record.questions)):
+            slot = 5 * row + question
+            np.testing.assert_allclose(
+                together_losses[0, slot],
+                alone_losses[row, question],
+                rtol=1e-5,
+                atol=1e-6,
+            )
+            for end in ("start", "end"):
+                expected = np.asarray(alone[end])[row, question][
+                    np.flatnonzero(alone_batch["allowed"][row, question])
+                ]
+                actual = np.asarray(together[end])[0, slot][
+                    np.flatnonzero(together_batch["allowed"][0, slot])
+                ]
+                np.testing.assert_allclose(
+                    actual, expected, rtol=1e-5, atol=1e-5
+                )
+
+    def loss(
+        weights: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> jax.Array:
+        total, mass = objective.terms(forward(weights, batch), batch)
+        return total / mass
+
+    alone_gradient = jax.grad(loss)(params, alone_batch)
+    together_gradient = jax.grad(loss)(params, together_batch)
+    for name, value in alone_gradient.items():
+        difference = np.asarray(together_gradient[name]) - np.asarray(value)
+        scale = max(float(np.linalg.norm(np.asarray(value))), 1e-8)
+        assert float(np.linalg.norm(difference)) / scale < 1e-4, name
+
+
+def _device(update: contracts.PhysicalUpdate) -> dict[str, jax.Array]:
+    """The first microbatch of a physical update, on device."""
+    return {
+        key: jnp.asarray(value[0]) for key, value in update.microbatches.items()
+    }

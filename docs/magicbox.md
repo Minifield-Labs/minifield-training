@@ -41,6 +41,14 @@ any split, rounding tokens up to a multiple of 128. Exported bundles use
 `minifield.magicbox.model/3`. The fusion architecture below still describes
 v1 and v2 bundles, which `bundle.load` continues to admit.
 
+Training packs several whole requests into each row of that length. Each
+request keeps its own segment ID and positions from 0, and attention and
+convolutions stay inside a segment, so a packed request gets the same losses
+and gradients as it would alone. Each epoch plans rows by online first-fit
+over a seeded shuffle, within the row's tokens and `QUESTIONS_PER_ROW` (32)
+questions. The plan derives from the seed and epoch, so a resumed run replays
+it exactly. `PACK = False` keeps 1 request per row.
+
 On the pinned TPU compiler (compile-only v5e, see the workspace experiment
 `magicbox-2026-09-29-tpu-compile-memory`), the joint gradient at 2,048 tokens
 and 8 questions peaked at 1.68, 1.76, 2.51, 2.82, and 3.17 GiB of host RAM for
@@ -137,7 +145,7 @@ no labels.
 ## Run defaults and recovery
 
 The notebook starts in `RUN_MODE = 'smoke'`. It runs up to 10 total updates of
-the full model, using 1 request per device, 1 microbatch, and 8 validation
+the full model, using 4 rows per device, 1 microbatch, and 8 validation
 records. Its first 2 updates save a checkpoint and verify its parameters, moments, step,
 and cursor against live state before continuing to the 10-update target. Rerunning
 an already completed smoke run adds no training updates. The inference cell
@@ -146,23 +154,23 @@ reloads the exported bundle in the notebook kernel.
 `DEVICES = None` detects the runtime's visible TPU devices. An explicit count
 requires exactly that many devices on the same host. This supports a Colab
 v5e-1 smoke run and an 8-device full run without changing model architecture.
-Requests per microbatch are `DEVICES * REQUESTS_PER_DEVICE`, with a default
-of 1 request per device. Both modes fix the joint sequence length and question
-count from the dataset's measured maximum. Padding retains these shapes for
-every update, including the final partial batch. Explicit overflow fails admission
-without truncation.
+Rows per microbatch are `DEVICES * ROWS_PER_DEVICE`, with a default of 4 rows
+per device; with packing, each row holds 1 or more whole requests. Both modes
+fix the row length from the dataset's longest joint sequence. Padding retains
+these shapes for every update, including the final partial batch. Explicit
+overflow fails admission without truncation.
 
 Set `RUN_MODE = 'full'` for these full-training defaults:
 
 - 3 epochs, frozen pretrained token embeddings; the encoder trunk and pointer projections train.
-- All visible TPU devices, 1 request per device, 4 accumulated microbatches.
-  On 8 devices this is 32 requests per logical update.
+- All visible TPU devices, 4 packed rows per device, 4 accumulated
+  microbatches. On 8 devices this is 128 rows per logical update.
 - BF16 activations, FP32 losses, parameters, and optimizer state.
 - AdamW: learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
   weight decay 0.01 for matrices, gradient clipping 1.0.
-- Gradient checkpointing for encoder and schema-row computation.
-- Schema processing in chunks of 4. Fixed source length 1,024, schema length
-  512, and schema row count 256; shorter observations are padded.
+- Gradient checkpointing for encoder blocks.
+- A fixed row length from the dataset's longest joint sequence and 32
+  question slots per row; shorter rows are padded.
 - Checkpoint every 250 updates; keep 2 complete states after evaluation.
 - 256 seeded validation records at each checkpoint. After all epochs,
   evaluate all available validation, calibration, test, and OOD records.
@@ -185,8 +193,8 @@ Missing labels contribute zero. An entirely unsupervised training batch raises
 Checkpoints contain parameters, Adam moments, update count, immutable source
 and dataset identities, and the next data cursor. Shuffle and dropout keys
 derive from that cursor and the seed. Changing batch topology, precision,
-encoder, architecture, seed, optimizer settings, dataset, or fixed-shape
-batching policy prevents resume.
+encoder, architecture, seed, optimizer settings, dataset, fixed-shape
+batching policy, or packing settings prevents resume.
 Epoch bounds and session time can increase without resetting the run.
 
 Default output directories include mode and device count, for example
