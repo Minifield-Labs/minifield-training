@@ -274,3 +274,78 @@ def _check_planned_stream(corpus: source.Corpus) -> None:
     assert [update.example_ids for update in planned(1)] == [
         updates[1].example_ids
     ]
+
+
+def _sourced_corpus(names: list[str]) -> source.Corpus:
+    """A corpus whose train and test splits carry only ids and provenance."""
+    corpus = object.__new__(source.Corpus)
+    rows = {
+        "id": [f"r{index}" for index in range(len(names))],
+        "provenance_json": [
+            json.dumps({"source": {"dataset": name}}) for name in names
+        ],
+    }
+    corpus._splits = {  # pylint: disable=protected-access
+        split: datasets.Dataset.from_dict(rows) for split in ("train", "test")
+    }
+    return corpus
+
+
+def test_corpus_reads_sources_and_samples_one_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evaluation can sample a single source's records, in its fixed order."""
+    names = ["ner", "roles", "ner", "roles", "roles"]
+    corpus = _sourced_corpus(names)
+    assert corpus.pointer_sources("test") == names
+    monkeypatch.setattr(
+        corpus, "compile_pointer", lambda raw, split: cast(object, raw["id"])
+    )
+    everything = list(corpus.pointer_records("test", 0, source="roles"))
+    assert sorted(cast(list[str], everything)) == ["r1", "r3", "r4"]
+    assert (
+        list(corpus.pointer_records("test", 2, source="roles"))
+        == everything[:2]
+    )
+
+
+def test_weighted_plan_resamples_downweighted_sources_each_epoch() -> None:
+    """Unweighted sources appear every epoch; a weighted one is resampled."""
+    names = ["ner"] * 60 + ["roles"] * 20
+    corpus = _sourced_corpus(names)
+    batches = pointer_batching.PointerBatchStrategy(
+        pointer_batching.Shape(1, 2, 64, 4, 128, 0), objective.balance_types
+    )
+    planned = source.planned_training_stream(
+        corpus,
+        batches,
+        [(20, 1)] * len(names),
+        5,
+        2,
+        lambda raw: cast(pointer.Record, raw),
+        prefetch=0,
+        sources=names,
+        weights={"ner": 0.5},
+    )
+    epochs = []
+    for epoch in range(2):
+        placed = sorted(
+            index
+            for update in planned.epoch_plan(epoch)
+            for row in update
+            for index in row
+        )
+        assert [index for index in placed if index >= 60] == list(range(60, 80))
+        assert 15 < sum(index < 60 for index in placed) < 45
+        epochs.append(placed)
+    assert epochs[0] != epochs[1]
+    with pytest.raises(ValueError, match="need each record's source"):
+        source.planned_training_stream(
+            corpus,
+            batches,
+            [(20, 1)] * len(names),
+            5,
+            1,
+            lambda raw: cast(pointer.Record, raw),
+            weights={"ner": 0.5},
+        )

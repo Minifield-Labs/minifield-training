@@ -1,6 +1,6 @@
 """Verified Parquet intake and disk-backed, deterministic training epochs."""
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import hashlib
 import json
 from pathlib import Path
@@ -241,13 +241,38 @@ class Corpus:
         for index in range(count):
             yield self.compile(dataset[index], split)
 
+    def pointer_sources(self, split: str) -> list[str]:
+        """Return each record's source dataset, in stored order."""
+        names: list[str] = []
+        columns = self.split(split).select_columns(["provenance_json"])
+        for chunk in columns.iter(batch_size=4096):
+            names.extend(
+                source_name(value) for value in chunk["provenance_json"]
+            )
+        return names
+
     def pointer_records(
-        self, split: str, limit: int
+        self, split: str, limit: int, source: str | None = None
     ) -> Iterator[pointer.Record]:
-        """Sample held-out pointer records with their original labels."""
+        """Sample held-out pointer records with their original labels.
+
+        With ``source``, sample only that source dataset's records.
+        """
         dataset = self.split(split).shuffle(seed=1729, keep_in_memory=False)
+        if source is not None:
+            dataset = dataset.filter(
+                lambda value: source_name(value) == source,
+                input_columns="provenance_json",
+                keep_in_memory=False,
+            )
         for index in range(min(limit, len(dataset)) if limit else len(dataset)):
             yield self.compile_pointer(dataset[index], split)
+
+
+def source_name(provenance_json: str) -> str:
+    """The upstream dataset a record came from, from its provenance."""
+    provenance = json_io.object_map(json.loads(provenance_json))
+    return str(json_io.object_map(provenance["source"])["dataset"])
 
 
 class Packer[RecordT](Protocol):
@@ -305,28 +330,51 @@ def planned_training_stream(
     prefetch: int = 2,
     open_limit: int = 64,
     close_below: float = 0.05,
+    sources: Sequence[str] | None = None,
+    weights: Mapping[str, float] | None = None,
 ) -> stream.PlannedStream[object, pointer.Record]:
     """Pack whole training requests into each update's fixed rows.
 
     Each epoch shuffles by ``seed + epoch`` and packs requests by online
     first-fit within the row's token and question capacity, so the plan and
     the resume cursor are deterministic. ``sizes`` come from
-    ``Corpus.pointer_sizes("train")``.
+    ``Corpus.pointer_sizes("train")``. With ``weights``, each epoch keeps a
+    record with its source's weight as the probability (``sources`` from
+    ``Corpus.pointer_sources("train")``), drawing a new sample every epoch.
     """
     data = corpus.split("train")
-    if len(sizes) != len(data):
-        raise ValueError("Packing sizes don't match the training split")
+    if len(sizes) != len(data) or (
+        sources is not None and len(sources) != len(sizes)
+    ):
+        raise ValueError(
+            "Packing sizes or sources don't match the training split"
+        )
+    if weights and sources is None:
+        raise ValueError("Source weights need each record's source")
     shape = batches.shape
-    return stream.PlannedStream(
-        epochs=epochs,
-        plan=lambda epoch: packing.plan_updates(
-            sizes,
+
+    def plan(epoch: int) -> list[list[list[int]]]:
+        kept = (
+            packing.thin(sources, weights, seed=seed + epoch)
+            if weights and sources is not None
+            else list(range(len(sizes)))
+        )
+        updates = packing.plan_updates(
+            [sizes[index] for index in kept],
             (shape.sequence_tokens, shape.questions),
             shape.capacity,
             seed=seed + epoch,
             open_limit=open_limit,
             close_below=close_below,
-        ),
+        )
+        return [
+            [[kept[item] for item in row] for row in update]
+            for update in updates
+        ]
+
+    return stream.PlannedStream(
+        epochs=epochs,
+        plan=plan,
         read=lambda index: data[index],
         compile_record=compile_record,
         pack=batches.pack_rows,
