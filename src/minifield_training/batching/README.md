@@ -84,6 +84,10 @@ before another opens, which bounds how far an item lands from its position.
 `seed`, plans rows in that order, and groups them into updates of
 `rows_per_update` rows. Every item appears once, and the plan depends only on
 the inputs, so a run replays it from `seed + epoch` instead of saving it.
+`packing.thin(labels, weights, seed=...)` keeps each item with its label's
+weight as the probability, so an epoch can use a fresh sample of an
+over-represented source. Weights are in (0, 1]; unlisted labels keep every
+item.
 
 ```python
 updates = packing.plan_updates(
