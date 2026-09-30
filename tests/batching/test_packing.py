@@ -137,25 +137,3 @@ def test_plan_updates_places_every_item_once_per_seed() -> None:
     for row in (row for update in plan for row in update):
         assert sum(sizes[index][0] for index in row) <= 16
         assert sum(sizes[index][1] for index in row) <= 4
-
-
-def test_thin_keeps_each_source_at_its_weight_reproducibly() -> None:
-    """Unlisted sources stay whole; a weighted one keeps about its share."""
-    labels = ["ner"] * 4000 + ["roles"] * 500
-    kept = packing.thin(labels, {"ner": 0.25}, seed=3)
-    assert kept == packing.thin(labels, {"ner": 0.25}, seed=3)
-    assert kept != packing.thin(labels, {"ner": 0.25}, seed=4)
-    assert kept == sorted(kept)
-    assert [index for index in kept if labels[index] == "roles"] == list(
-        range(4000, 4500)
-    )
-    ner = sum(labels[index] == "ner" for index in kept)
-    # Binomial(4000, 0.25): mean 1000, SD about 27.
-    assert 900 < ner < 1100
-
-
-def test_thin_rejects_weights_outside_zero_to_one() -> None:
-    """Upweighting would repeat records within an epoch."""
-    for weight in (0.0, 1.5):
-        with pytest.raises(ValueError, match=r"\(0, 1\]"):
-            packing.thin(["a"], {"a": weight}, seed=0)

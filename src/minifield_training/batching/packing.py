@@ -1,6 +1,6 @@
 """Deterministic packing of short token sequences into fixed-length rows."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 import dataclasses
 
 import numpy as np
@@ -185,25 +185,6 @@ def plan_rows(
             rows.append(open_rows.pop(position)[1])
     rows.extend(members for _, members in open_rows)
     return rows
-
-
-def thin(
-    labels: Sequence[str], weights: Mapping[str, float], *, seed: int
-) -> list[int]:
-    """Keep each item with its label's weight as the probability, in order.
-
-    Unlisted labels keep every item. Weights above 1 would need repeats, which
-    can put one record twice in an update, so they aren't allowed; lower the
-    other labels instead. The result depends only on the inputs.
-    """
-    if any(not 0 < weight <= 1 for weight in weights.values()):
-        raise ValueError("Source weights must be in (0, 1]")
-    draws = np.random.default_rng([seed, 1]).random(len(labels))
-    return [
-        index
-        for index, label in enumerate(labels)
-        if draws[index] < weights.get(label, 1.0)
-    ]
 
 
 def plan_updates(

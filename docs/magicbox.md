@@ -179,11 +179,6 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
   from each source in each of validation, calibration, test, and OOD
   (`FINAL_RECORDS = 0` evaluates all). `final-<split>.json` holds each
   source's metrics and an `all` entry pooled by count.
-- Each epoch uses a fresh 10% sample of the Nemotron-PII and
-  PubMedAbstractsNER training records (`SOURCE_WEIGHTS`), and every record
-  from the other sources. Those 2 NER sources hold most extraction fields,
-  and their "earliest mention of a type" targets taught the model to answer
-  with the first value-looking token.
 - Each session runs up to 8 hours. Rerunning resumes the next unread update.
 
 The recipe uses a constant learning rate. There is no warmup, scheduler,

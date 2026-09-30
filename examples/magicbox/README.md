@@ -31,8 +31,7 @@ fresh seeded plan, built before training starts, so a resumed run replays the
 same updates. Updates per epoch vary with the plan; the notebook prints the
 count and how full the rows are. `PACK = False` restores 1 request per row.
 `PREFETCH = 2` prepares 2 updates ahead on a background thread, and progress
-reports include `batch_wait_seconds`. `SOURCE_WEIGHTS` gives the chance each
-training record is used in an epoch, by source; it's part of the run identity.
+reports include `batch_wait_seconds`.
 Final evaluation reports every source separately.
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision

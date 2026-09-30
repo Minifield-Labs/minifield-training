@@ -1,6 +1,6 @@
 """Verified Parquet intake and disk-backed, deterministic training epochs."""
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 import hashlib
 import json
 from pathlib import Path
@@ -330,51 +330,28 @@ def planned_training_stream(
     prefetch: int = 2,
     open_limit: int = 64,
     close_below: float = 0.05,
-    sources: Sequence[str] | None = None,
-    weights: Mapping[str, float] | None = None,
 ) -> stream.PlannedStream[object, pointer.Record]:
     """Pack whole training requests into each update's fixed rows.
 
     Each epoch shuffles by ``seed + epoch`` and packs requests by online
     first-fit within the row's token and question capacity, so the plan and
     the resume cursor are deterministic. ``sizes`` come from
-    ``Corpus.pointer_sizes("train")``. With ``weights``, each epoch keeps a
-    record with its source's weight as the probability (``sources`` from
-    ``Corpus.pointer_sources("train")``), drawing a new sample every epoch.
+    ``Corpus.pointer_sizes("train")``.
     """
     data = corpus.split("train")
-    if len(sizes) != len(data) or (
-        sources is not None and len(sources) != len(sizes)
-    ):
-        raise ValueError(
-            "Packing sizes or sources don't match the training split"
-        )
-    if weights and sources is None:
-        raise ValueError("Source weights need each record's source")
+    if len(sizes) != len(data):
+        raise ValueError("Packing sizes don't match the training split")
     shape = batches.shape
-
-    def plan(epoch: int) -> list[list[list[int]]]:
-        kept = (
-            packing.thin(sources, weights, seed=seed + epoch)
-            if weights and sources is not None
-            else list(range(len(sizes)))
-        )
-        updates = packing.plan_updates(
-            [sizes[index] for index in kept],
+    return stream.PlannedStream(
+        epochs=epochs,
+        plan=lambda epoch: packing.plan_updates(
+            sizes,
             (shape.sequence_tokens, shape.questions),
             shape.capacity,
             seed=seed + epoch,
             open_limit=open_limit,
             close_below=close_below,
-        )
-        return [
-            [[kept[item] for item in row] for row in update]
-            for update in updates
-        ]
-
-    return stream.PlannedStream(
-        epochs=epochs,
-        plan=plan,
+        ),
         read=lambda index: data[index],
         compile_record=compile_record,
         pack=batches.pack_rows,
