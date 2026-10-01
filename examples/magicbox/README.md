@@ -35,7 +35,7 @@ reports include `batch_wait_seconds`.
 Final evaluation reports every source separately.
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
-`f074bb549f16ea091fd8ece12e79652b8082871f`. Set `DATASET` to a completed local
+`6e80c9c99a2840c1d863a7ed95e04bd31734f67e`. Set `DATASET` to a completed local
 directory to use an attached dataset. Both modes train the joint pointer model
 (see [the MagicBox guide](../../docs/magicbox.md#joint-pointer-model)). With
 `SEQUENCE_TOKENS = None` and `QUESTIONS = None`, the notebook measures the
