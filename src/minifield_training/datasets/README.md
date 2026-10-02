@@ -94,10 +94,8 @@ The package stays CPU-only and imports no optional tokenizer/Arrow libraries.
 
 ## Dataset contract snapshots
 
-Keep each dataset's format documentation and snapshot identity in its own
-directory here. The MagicBox dataset's [v1 format](magicbox/format-v1.md) and
-[producer revision/checksum](magicbox/format-v1.json) define its published
-record contract.
+A product dataset's format documentation and snapshot identity live with its
+adapter. MagicBox's are in [examples/magicbox](../../../examples/magicbox).
 
 ## Pointer questions
 

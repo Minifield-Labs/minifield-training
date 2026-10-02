@@ -120,9 +120,9 @@ identity. Throughput on TPU is unmeasured.
 ## Dataset contract
 
 The dataset's consumer snapshot is
-[the format document](../src/minifield_training/datasets/magicbox/format-v1.md),
+[the format document](../examples/magicbox/format-v1.md),
 with its producer revision and checksum in
-[the snapshot identity](../src/minifield_training/datasets/magicbox/format-v1.json).
+[the snapshot identity](../examples/magicbox/format-v1.json).
 The supported format is `minifield.magicbox/1.0`, schema template
 `magicbox-rows/1`, and offset policy `trim-text-preserve-whitespace/2`.
 
