@@ -84,12 +84,21 @@ class TargetEncoder[RecordT](Protocol):
         """Write one real row's targets into the supplied host arrays."""
 
 
+class CapacityShape(Protocol):
+    """Logical capacity shared by dense and multi-sequence layouts."""
+
+    @property
+    @abstractmethod
+    def capacity(self) -> int:
+        """Maximum real records in one logical update."""
+
+
 class BatchStrategy[RecordT](Protocol):
     """Interchangeable construction of resumable logical updates."""
 
     @property
     @abstractmethod
-    def shape(self) -> BatchShape:
+    def shape(self) -> CapacityShape:
         """Physical dimensions owned by this strategy."""
 
     @abstractmethod

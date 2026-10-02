@@ -5,7 +5,8 @@ with executable quality gates.
 
 ## Start here
 
-Use Python 3.12 and uv 0.11.30. From this repository:
+Use Python 3.12 and uv 0.11.30 for development. The training package also admits
+Python 3.13 notebook kernels. From this repository:
 
 ```sh
 uv sync --locked
@@ -89,3 +90,20 @@ qualification evidence belong to the components that introduce them.
 
 See [contributing](CONTRIBUTING.md) for commands and
 [documentation ownership](docs/README.md) for where contracts and evidence live.
+
+## MagicBox training
+
+[The TPU notebook](examples/kaggle_magicbox_lfm350m_tpu_v5e_8.ipynb)
+trains the LFM2.5 Encoder 350M MagicBox architecture on the completed
+`minifield.magicbox/1.0` dataset. It includes an offline tiny-model check,
+a 2-update full-model TPU check, encoder/head training with frozen token embeddings, exact resume,
+held-out evaluation, inference export, and reload/prediction. Setup clones
+the training repository from GitHub and checks out a pinned commit.
+
+It detects single-host TPU device counts and defaults to a 10-update smoke
+run. Set `RUN_MODE = 'full'` for the 3-epoch recipe, with a 32-request logical
+batch on 8 devices. Both modes download the pinned `protodotdesign/magicbox-v1`
+dataset and save to separate run directories.
+
+See [the architecture and run guide](docs/magicbox.md) and
+[the example README](examples/magicbox/README.md).

@@ -1,5 +1,6 @@
 """Atomic, hash-bound safetensors checkpoints for exact update continuation."""
 
+from collections.abc import Mapping
 import dataclasses
 import json
 import os
@@ -239,3 +240,43 @@ def load_warm_start_masters(
         tensor_filename=tensor_filename,
     )
     return restored["params"]
+
+
+def verify_roundtrip(
+    directory: Path,
+    current: state.State,
+    cursor: Cursor,
+    inventory: core_parameters.FullParameterInventory,
+    optimizer_id: str,
+) -> None:
+    """Check every saved parameter and moment against live device state."""
+    with jax.default_device(jax.devices("cpu")[0]):
+        restored, restored_cursor = load(
+            directory,
+            inventory,
+            optimizer_id=optimizer_id,
+            run_id=cursor.run_id,
+            data_sha256=cursor.data_sha256,
+            source_id=cursor.source_id,
+        )
+    if restored_cursor != cursor or not np.array_equal(
+        np.asarray(current["step"]), np.asarray(restored["step"])
+    ):
+        raise RuntimeError("Checkpoint cursor or optimizer step changed")
+
+    def compare_group(
+        group: str,
+        live: Mapping[str, jax.Array],
+        saved: Mapping[str, jax.Array],
+    ) -> None:
+        """Identify the first tensor changed by serialization."""
+        for name in inventory.names:
+            if not np.array_equal(
+                np.asarray(live[name]),
+                np.asarray(saved[name]),
+            ):
+                raise RuntimeError(f"Checkpoint changed {group}/{name}")
+
+    compare_group("params", current["params"], restored["params"])
+    compare_group("m", current["m"], restored["m"])
+    compare_group("v", current["v"], restored["v"])

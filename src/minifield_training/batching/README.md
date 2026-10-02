@@ -33,7 +33,8 @@ decisions = decision_batches.iter_updates(decision_records, seed=17)
 Model inputs and attention masks have shape `[M, B, T]`. Token targets have
 the same shape; class labels and valid-row masks have shape `[M, B]`.
 `PhysicalUpdate.active` is a NumPy boolean `[M]` vector for host slot selection.
-All arrays in `microbatches` are JAX arrays. The scanned JIT step places `active`
+Dense batches hold JAX arrays in `microbatches`. Schema batches hold host arrays
+for transfer by the streaming engine. The scanned JIT step places `active`
 at its call boundary; direct eager calls should use `jnp.asarray(active)`.
 The streaming step consumes host flags directly.
 
@@ -52,3 +53,33 @@ optional absolute deadline. The shared runner consumes either interface.
 
 Sequence packing isn't implemented. Concatenating records needs segment-aware
 attention and an objective that preserves supervision boundaries.
+
+## Schema-conditioned batches
+
+`schema_fields.SchemaBatchStrategy` implements the same `BatchStrategy`
+contract for `[microbatches, requests, schema_rows, schema_tokens]` plus one
+source sequence per request. `contracts.CapacityShape` exposes only logical
+capacity, allowing dense and multi-sequence layouts to share the interface.
+
+`schema_fields.Shape` requires explicit vocabulary and pad token IDs. The model
+adapter owns context limits. `bucket` chooses power-of-two dimensions within
+caller caps; overflow raises without truncation. Set `fixed_shape=True` on
+`SchemaBatchStrategy` to bypass bucketing and pad every update to `shape`,
+including partial final updates. Source tokens, schema tokens, and schema row
+count then stay constant across batches; masks and field weights make padding
+inert. MagicBox training selects this policy. The default bucketed behavior
+remains available for other consumers. Candidate groups stay on one
+request/device and replay seeds bind update, record, field, and candidate IDs.
+
+The caller injects a weighting function over labeled field kinds. It runs once
+for the complete logical update before physical slicing; batching only assigns
+its returned weights to the first row of each field. Missing labels and further
+candidate rows carry zero weight. Objective mathematics stays in `objectives`.
+Inference packing explicitly permits an unsupervised request.
+
+`stream.EpochStream` owns bounded chunk compilation, partial final updates,
+global cursor and epoch recovery, and deadlines. Callers provide the ordered
+per-epoch reader, record compiler, and pack function. Both training examples use
+it while retaining their own Arrow or NumPy shuffle policy. Independent tests
+verify exact replay and an unrelated schema consumer with different padding,
+vocabulary, context length, and loss weights.

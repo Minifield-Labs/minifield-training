@@ -1,0 +1,9 @@
+{
+  "producer": "magicbox-data",
+  "revision": "7d3aa26",
+  "path": "docs/format.md",
+  "sha256": "a3c93f2385ee3a99ca40696c6d2384ccb2e49fa35017c846ee1250632b2d86ab",
+  "format": "minifield.magicbox/1.0",
+  "template": "magicbox-rows/1",
+  "offset_policy": "trim-text-preserve-whitespace/2"
+}

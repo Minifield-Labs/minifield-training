@@ -85,3 +85,13 @@ Classification training, prediction, and SFT training pass the same effective
 weights into model forward. FP32 masters and Adam moments stay unquantized.
 This first recipe applies full fake quantization from update 1. A ramp schedule
 and TPU qualification need separate evidence.
+
+## Schema-field supervision
+
+`schema_fields.make_step(forward, inventory, optimizer, mesh=None)` binds typed
+field losses to the shared streaming update engine. The caller supplies a
+training forward and complete parameter inventory. It imports no concrete model
+and owns no checkpoint writer, tokenizer, dataset wire format, or release pin.
+The example binds its selected encoder and heads through this interface.
+Independent tests train an unrelated four-scalar model and compare analytical
+gradients across multiple microbatch partitions.

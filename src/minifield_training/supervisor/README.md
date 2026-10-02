@@ -1,10 +1,12 @@
 # Worker process and transport supervision
 
-Process isolation, transport adapters, local device slots, cancellation delivery, child cleanup, and result publication. Consume normalized execution contracts without becoming another scheduler or job database. Hosted scheduling and durable lifecycle remain in backend. Local tests must cover process failure and cleanup before a transport becomes a supported execution route.
+`diagnostics.memory_snapshot` reads Linux process RSS, peak RSS, and available
+host memory in KiB. `diagnostics.monitor` prints and flushes periodic JSONL
+samples to a caller-selected directory, including on context exit. Other hosts
+emit elapsed time and PID without fabricated memory readings.
 
-Status: reserved. No implementation yet. Add a docstring-only `__init__.py`
-with the first real module; this directory currently contributes no executable
-behavior.
+The TPU notebook consumes this accelerator-free monitor around expensive stages.
+Tests in `tests/supervisor/test_diagnostics.py` cover parsing, persistence, and
+cleanup. Process scheduling and remote delivery remain unimplemented.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
-Document each added public contract, consumer, example, and test here.

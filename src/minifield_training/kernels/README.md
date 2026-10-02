@@ -138,3 +138,9 @@ CPU metadata remains in `core`. Attention kernels are consumed by the shared
 attention layer and keep their own independent backend tests in
 `tests/kernels/test_attention.py`. CPU cuDNN-wrapper and Splash-interpret
 checks don't establish CUDA or TPU qualification.
+
+`bidirectional` adds XLA pad-masked GQA, centered grouped short convolution,
+affine LayerNorm with FP32 moments, and inverted dropout. Empty attention
+rows return zero. Analytical CPU tests cover integer/boolean masks, exact
+convolution boundaries, and input gradients. TPU qualification runs in the
+MagicBox notebook's full-model startup cell.

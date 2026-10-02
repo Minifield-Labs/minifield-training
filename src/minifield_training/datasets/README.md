@@ -76,3 +76,25 @@ The bounded synthetic acceptance path is executable with
 It reads JSONL, prepares and tokenizes with an offline local vocabulary,
 replays a verified artifact, builds a padded update, and decreases selected
 next-token loss on the public tiny LFM2.5 model. This is CPU evidence only.
+
+## Schema-conditioned records
+
+`fields.Encoding`, `Field`, and `Record` describe token offsets, independently
+encoded schema rows, and separately stored supervision. `Kind` identifies
+extraction, categorical, binary, and ordinal tasks. `validate` checks configured
+vocabulary bounds, field grouping, normalized targets, and consistent extraction
+presence/span supervision. It imposes no BOS ID, tokenizer, template, product
+wire format, or context limit.
+
+`aligned_span` preserves exact character boundaries and overlapping Unicode
+byte tokens. `trim_offsets` provides the explicit whitespace-edge policy;
+`probabilities` admits finite hard/soft target distributions. Product adapters
+own request keys, schema wording, release pins, and their special-token rules.
+The package stays CPU-only and imports no optional tokenizer/Arrow libraries.
+
+## Dataset contract snapshots
+
+Keep each dataset's format documentation and snapshot identity in its own
+directory here. The MagicBox dataset's [v1 format](magicbox/format-v1.md) and
+[producer revision/checksum](magicbox/format-v1.json) define its published
+record contract.

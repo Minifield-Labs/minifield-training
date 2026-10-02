@@ -87,3 +87,9 @@ These tests qualify the covered CPU shapes and FP32 operations. Mixed-precision
 whole blocks, all block-weight gradients, accelerator backends, larger shapes
 and performance still need separate evidence. The shared primitive tests cover
 additional dtype and backend modes described in the kernel README.
+
+`schema_fusion` composes row-local bidirectional self attention, source cross
+attention, and a GELU FFN. Each sublayer is pre-LayerNorm with residual
+output dropout; padded query positions are zeroed after every residual.
+Source memory is read-only. FP32 masters are cast to activation precision,
+including FFN biases. MagicBox owns dimensions and distinct layer parameters.
