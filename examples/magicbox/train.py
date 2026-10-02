@@ -414,8 +414,11 @@ def final_evaluation(
     """Evaluate each held-out source separately; ``limit`` 0 reads all.
 
     ``final-<split>.json`` holds each source's metrics and an ``all`` entry
-    pooled by count. A quantized run also writes
-    ``final-<split>-<quantizer>.json`` for its student.
+    pooled by count; rank and calibration metrics pool as count-weighted
+    means of each source's value. ``final-ood-degradation.json`` holds each
+    pooled metric's relative change from test to OOD, positive when worse.
+    A quantized run also writes ``final-<split>-<quantizer>.json`` for its
+    student.
     """
     _final_evaluation(run, evaluator, params, output, limit, "")
     if run.settings.quantizer is not None:
@@ -437,6 +440,7 @@ def _final_evaluation(
     limit: int,
     suffix: str,
 ) -> None:
+    pooled = {}
     for split in SPLITS:
         if not any(shard["split"] == split for shard in run.corpus.shards):
             continue
@@ -457,6 +461,7 @@ def _final_evaluation(
                 flush=True,
             )
         metrics = {"all": combine(by_source.values()), **by_source}
+        pooled[split] = metrics["all"]
         (output / f"final-{split}{suffix}.json").write_text(
             json.dumps(metrics, indent=2)
         )
@@ -466,6 +471,13 @@ def _final_evaluation(
             ),
             flush=True,
         )
+    if "test" in pooled and "ood" in pooled:
+        # Relative change from test to OOD for every shared metric.
+        shift = evaluate_pointer.degradation(pooled["test"], pooled["ood"])
+        (output / f"final-ood-degradation{suffix}.json").write_text(
+            json.dumps(shift, indent=2)
+        )
+        print(json.dumps({"ood_degradation" + suffix: shift}), flush=True)
 
 
 def save_bundle(

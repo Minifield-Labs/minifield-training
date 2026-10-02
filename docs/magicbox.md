@@ -199,7 +199,11 @@ have CPU equivalence and learning tests; their TPU speed, memory and accuracy
 need the hardware run. Settings that are off leave the run identity unchanged.
 Validation reports contain per-type loss and field counts, extraction exact
 match/false-positive/false-null rates, choice accuracy, binary Brier score,
-and ordinal MAE. Exact extraction compares the dataset's canonical gold span.
+and ordinal MAE, plus the calibration, ranking, F1, IoU and equal-type
+error-reduction metrics listed in [the evaluation
+README](../src/minifield_training/evaluation/README.md). Final evaluation also
+writes `final-ood-degradation.json`: each pooled metric's relative change from
+test to OOD, positive when worse. Exact extraction compares the dataset's canonical gold span.
 Alternative acceptable spans in provenance aren't included in that metric.
 
 Losses first average selectable token BCE within each extraction field, then

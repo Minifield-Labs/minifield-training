@@ -159,12 +159,108 @@ class Predictor(schema_fields.SingleRequest):
         return decoded, losses[: len(record.questions)]
 
 
+_BINS = 10
+_EPSILON = 1e-12
+
+
+def expected_calibration_error(
+    confidences: Sequence[float], outcomes: Sequence[float]
+) -> float:
+    """Count-weighted gap between mean confidence and mean outcome per bin."""
+    bins: dict[int, list[tuple[float, float]]] = {}
+    for confidence, outcome in zip(confidences, outcomes, strict=True):
+        index = min(int(confidence * _BINS), _BINS - 1)
+        bins.setdefault(index, []).append((confidence, outcome))
+    return sum(
+        abs(sum(c for c, _ in items) - sum(o for _, o in items))
+        for items in bins.values()
+    ) / max(len(confidences), 1)
+
+
+def auroc(scores: Sequence[float], positives: Sequence[bool]) -> float | None:
+    """Probability a positive outranks a negative; ties count half."""
+    ranks = _ranks(scores)
+    count = sum(positives)
+    negatives = len(positives) - count
+    if not count or not negatives:
+        return None
+    total = sum(
+        rank
+        for rank, positive in zip(ranks, positives, strict=True)
+        if positive
+    )
+    return (total - count * (count + 1) / 2) / (count * negatives)
+
+
+def spearman(left: Sequence[float], right: Sequence[float]) -> float | None:
+    """Pearson correlation of average ranks."""
+    if len(left) < 2:
+        return None
+    a, b = np.asarray(_ranks(left)), np.asarray(_ranks(right))
+    a, b = a - a.mean(), b - b.mean()
+    scale = math.sqrt(float(np.sum(a * a) * np.sum(b * b)))
+    return float(np.sum(a * b)) / scale if scale else None
+
+
+def _ranks(values: Sequence[float]) -> list[float]:
+    """1-based ranks, ties sharing their average rank."""
+    order = sorted(range(len(values)), key=lambda index: values[index])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        stop = start
+        while (
+            stop + 1 < len(order)
+            and values[order[stop + 1]] == values[order[start]]
+        ):
+            stop += 1
+        for position in range(start, stop + 1):
+            ranks[order[position]] = (start + stop) / 2 + 1
+        start = stop + 1
+    return ranks
+
+
+def token_f1(predicted: str | None, expected: str | None) -> float:
+    """SQuAD-style lowercase whitespace-token F1; two nulls score 1."""
+    if predicted is None or expected is None:
+        return float(predicted is None and expected is None)
+    guess, gold = predicted.lower().split(), expected.lower().split()
+    common = sum(
+        min(guess.count(token), gold.count(token)) for token in set(guess)
+    )
+    if not common:
+        return 0.0
+    precision, recall = common / len(guess), common / len(gold)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _iou(left: tuple[int, int], right: tuple[int, int]) -> float:
+    overlap = max(0, min(left[1], right[1]) - max(left[0], right[0]))
+    union = max(left[1], right[1]) - min(left[0], right[0])
+    return overlap / union if union else 0.0
+
+
 class Metrics:
-    """Compare typed answers with supervised questions, per question type."""
+    """Compare typed answers with supervised questions, per question type.
+
+    Besides each type's mean metrics, rank and calibration metrics keep
+    per-question values until ``means``. ``<type>/error_reduction`` is
+    ``1 - error / baseline`` against a trivial answer (always null, a
+    uniform guess, 0.5, or the middle level); ``error_reduction`` weights
+    the types equally.
+    """
 
     def __init__(self, names: tuple[str, str, str, str]):
         self.names = names
         self._totals = schema_fields.Metrics(names=names)
+        self._choice: list[tuple[float, bool]] = []
+        self._binary: list[tuple[float, float]] = []
+        self._ordinal: list[tuple[float, float]] = []
+        self._nulls = {"both": 0, "predicted": 0, "expected": 0}
+        self._errors: dict[int, list[tuple[float, float]]] = {}
+
+    def _error(self, kind: int, error: float, baseline: float) -> None:
+        self._errors.setdefault(kind, []).append((error, baseline))
 
     def record(
         self,
@@ -172,46 +268,194 @@ class Metrics:
         decoded: dict[str, object],
         losses: list[float],
     ) -> None:
-        """Add each supervised question's loss and type-specific metric."""
+        """Add each supervised question's loss and type-specific metrics."""
         for index, question in enumerate(record.questions):
             if not question.supervised:
                 continue
             name = self.names[question.kind]
-            value = json_io.object_map(decoded[question.key])["value"]
+            answer = json_io.object_map(decoded[question.key])
+            value = answer["value"]
             self._totals.add(name + "/loss", losses[index])
             targets = question.targets
             if question.kind == fields.Kind.EXTRACT:
-                if question.span is None:
-                    self._totals.add(
-                        name + "/false_positive", float(value is not None)
-                    )
-                    continue
-                offsets = record.source.offsets
-                expected = record.text[
-                    offsets[question.span[0]][0] : offsets[
-                        question.span[1] - 1
-                    ][1]
-                ]
-                self._totals.add(name + "/exact", float(value == expected))
-                self._totals.add(name + "/false_null", float(value is None))
-            elif question.kind == fields.Kind.CHOICE:
-                expected = question.options[int(np.argmax(targets))].label
-                self._totals.add(name + "/accuracy", float(value == expected))
-            elif question.kind == fields.Kind.BINARY:
-                labels = [option.label for option in question.options]
-                truth = targets[labels.index("true")]
+                self._extraction(record, question, answer)
+                continue
+            labels = [option.label for option in question.options]
+            probabilities = json_io.object_map(answer["probabilities"])
+            predicted = [float(str(probabilities[label])) for label in labels]
+            if question.kind == fields.Kind.CHOICE:
+                gold = int(np.argmax(targets))
+                correct = value == labels[gold]
+                ranked = sorted(predicted, reverse=True)
+                self._totals.add(name + "/accuracy", float(correct))
                 self._totals.add(
-                    name + "/brier", (float(str(value)) - truth) ** 2
+                    name + "/nll", -math.log(max(predicted[gold], _EPSILON))
                 )
+                self._totals.add(
+                    name + "/margin",
+                    ranked[0] - (ranked[1] if len(ranked) > 1 else 0.0),
+                )
+                self._choice.append((ranked[0], correct))
+                self._error(
+                    question.kind, 1 - float(correct), 1 - 1 / len(labels)
+                )
+            elif question.kind == fields.Kind.BINARY:
+                truth = targets[labels.index("true")]
+                p = min(max(float(str(value)), _EPSILON), 1 - _EPSILON)
+                self._totals.add(name + "/brier", (p - truth) ** 2)
+                self._totals.add(
+                    name + "/nll",
+                    -(truth * math.log(p) + (1 - truth) * math.log(1 - p)),
+                )
+                self._binary.append((p, truth))
+                self._error(question.kind, (p - truth) ** 2, (0.5 - truth) ** 2)
             else:
                 expectation = sum(
                     level * probability
                     for level, probability in enumerate(targets)
                 )
+                predicted_level = float(str(value))
                 self._totals.add(
-                    name + "/mae", abs(float(str(value)) - expectation)
+                    name + "/mae", abs(predicted_level - expectation)
                 )
+                self._totals.add(
+                    name + "/within_1",
+                    float(
+                        abs(round(predicted_level) - int(np.argmax(targets)))
+                        <= 1
+                    ),
+                )
+                self._ordinal.append((predicted_level, expectation))
+                self._error(
+                    question.kind,
+                    abs(predicted_level - expectation),
+                    abs((len(labels) - 1) / 2 - expectation),
+                )
+
+    def _extraction(
+        self,
+        record: pointer.Record,
+        question: pointer.Question,
+        answer: dict[str, object],
+    ) -> None:
+        name = self.names[fields.Kind.EXTRACT]
+        value = answer["value"]
+        predicted = None if value is None else str(value)
+        expected, gold_span = None, None
+        if question.span is not None:
+            offsets = record.source.offsets
+            gold_span = (
+                offsets[question.span[0]][0],
+                offsets[question.span[1] - 1][1],
+            )
+            expected = record.text[gold_span[0] : gold_span[1]]
+        self._totals.add(name + "/token_f1", token_f1(predicted, expected))
+        self._nulls["both"] += predicted is None and expected is None
+        self._nulls["predicted"] += predicted is None
+        self._nulls["expected"] += expected is None
+        self._error(
+            fields.Kind.EXTRACT,
+            float(predicted != expected),
+            float(expected is not None),
+        )
+        if gold_span is None:
+            self._totals.add(
+                name + "/false_positive", float(predicted is not None)
+            )
+            return
+        self._totals.add(name + "/exact", float(predicted == expected))
+        self._totals.add(name + "/false_null", float(predicted is None))
+        span = cast(tuple[int, int] | None, answer.get("character_span"))
+        self._totals.add(
+            name + "/span_iou", 0.0 if span is None else _iou(span, gold_span)
+        )
 
     def means(self) -> dict[str, float]:
         """Return question means, counts, and the equal-type loss."""
-        return self._totals.means()
+        result = self._totals.means()
+        extract, choice, binary, ordinal = self.names
+
+        def put(name: str, value: float | None, count: int) -> None:
+            if value is not None and count:
+                result[name] = value
+                result[name + "/count"] = float(count)
+
+        if self._choice:
+            put(
+                choice + "/ece",
+                expected_calibration_error(
+                    [c for c, _ in self._choice],
+                    [float(o) for _, o in self._choice],
+                ),
+                len(self._choice),
+            )
+        if self._binary:
+            put(
+                binary + "/ece",
+                expected_calibration_error(
+                    [p for p, _ in self._binary], [t for _, t in self._binary]
+                ),
+                len(self._binary),
+            )
+            put(
+                binary + "/auroc",
+                auroc(
+                    [p for p, _ in self._binary],
+                    [t >= 0.5 for _, t in self._binary],
+                ),
+                len(self._binary),
+            )
+        put(
+            ordinal + "/spearman",
+            spearman(
+                [p for p, _ in self._ordinal], [g for _, g in self._ordinal]
+            ),
+            len(self._ordinal),
+        )
+        denominator = self._nulls["predicted"] + self._nulls["expected"]
+        put(
+            extract + "/null_f1",
+            2 * self._nulls["both"] / denominator if denominator else None,
+            self._nulls["expected"],
+        )
+        reductions = []
+        for kind, pairs in sorted(self._errors.items()):
+            baseline = sum(b for _, b in pairs)
+            if baseline:
+                reduction = 1 - sum(e for e, _ in pairs) / baseline
+                put(
+                    self.names[kind] + "/error_reduction", reduction, len(pairs)
+                )
+                reductions.append(reduction)
+        if reductions:
+            put(
+                "error_reduction",
+                sum(reductions) / len(reductions),
+                sum(len(pairs) for pairs in self._errors.values()),
+            )
+        return result
+
+
+# Metrics where a larger value is worse.
+LOWER_IS_BETTER = (
+    "loss",
+    "false_positive",
+    "false_null",
+    "brier",
+    "mae",
+    "nll",
+    "ece",
+)
+
+
+def degradation(
+    in_domain: dict[str, float], shifted: dict[str, float]
+) -> dict[str, float]:
+    """Relative change from in-domain to shifted metrics; positive is worse."""
+    result = {}
+    for name, base in in_domain.items():
+        if name.endswith("/count") or name not in shifted or not base:
+            continue
+        sign = 1 if name.rsplit("/", 1)[-1] in LOWER_IS_BETTER else -1
+        result[name] = sign * (shifted[name] - base) / abs(base)
+    return result
