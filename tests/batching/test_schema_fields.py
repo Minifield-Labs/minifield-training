@@ -423,3 +423,28 @@ def test_bucketing_counts_packed_sequences_at_the_row_bucket(
     )
     assert default.schema_sequences is None
     assert default.packed_sequences == default.schema_rows == 8
+
+
+def test_bucketing_widens_packed_rows_before_rejecting() -> None:
+    """10 rows of 64 tokens fit 4 x 512; bucketing widens rows to fit."""
+    wide = _binary_record("wide")
+    rows = dataclasses.replace(
+        wide.fields[0],
+        kind=fields.Kind.CHOICE,
+        candidates=tuple(str(index) for index in range(10)),
+        rows=tuple((8, *([index + 1] * 63)) for index in range(10)),
+        targets=(1.0,) + (0.0,) * 9,
+    )
+    record = dataclasses.replace(wide, fields=(rows,))
+    shape = schema_fields.Shape(1, 1, 8, 512, 16, 11, 10, schema_sequences=4)
+    bucketed = schema_fields.bucket([record], shape)
+    # 64-token rows need 10 sequences and 128 need 5; 256 need 3 (bucket 4).
+    assert (bucketed.schema_tokens, bucketed.schema_sequences) == (256, 4)
+    narrow = schema_fields.bucket(
+        [record], dataclasses.replace(shape, schema_sequences=2)
+    )
+    assert (narrow.schema_tokens, narrow.schema_sequences) == (512, 2)
+    with pytest.raises(ValueError, match="limit is 1"):
+        schema_fields.bucket(
+            [record], dataclasses.replace(shape, schema_sequences=1)
+        )
