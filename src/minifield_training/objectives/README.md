@@ -36,3 +36,8 @@ type: a softmax over each question's allowed tokens, averaged over the start
 and end pointers. Padding questions have zero targets and zero loss.
 `pointer.terms` returns the type-weighted sum and weight mass. Tests check
 hand-derived losses and gradients, including masked and padding positions.
+`pointer.distillation` is the temperature-softened KL from a teacher's
+pointer distributions to a student's over each question's allowed tokens,
+times T², with no gradient to the teacher. `pointer.distilled_terms` trains
+shared weights as a dense parent and a quantized student at once: dense
+cross-entropy plus weighted student cross-entropy and distillation.

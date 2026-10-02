@@ -41,6 +41,14 @@ runtime bundle; config/tokenizer packaging and admission remain separate.
 It doesn't reduce storage size. Mixed dense embeddings plus packed projections
 need a future runtime per-tensor precision contract.
 
+`PackedGroup128Output` stores a group-128 QAT inventory's quantized matrices
+as `name.codes` (U8, first code in the lowest bits) and `name.scales` (F16),
+in the runtime's `minifield.nf4.v1` or `minifield.ternary.v1` layout, and
+every other tensor as FP32. `load_packed` decodes them to the exact weights
+the QAT forward used. Tests round-trip both quantizers bit for bit. Packing
+and NF4 codes and scales matched the runtime converter on a random matrix.
+`bundle.save(..., output=...)` and `bundle.load(..., packed=True)` carry it.
+
 `bundle.save` atomically packages dense FP32 weights, explicitly named assets,
 and caller-supplied metadata into an immutable directory. The caller owns the
 format and model configuration. The writer adds a `files` SHA-256 map to

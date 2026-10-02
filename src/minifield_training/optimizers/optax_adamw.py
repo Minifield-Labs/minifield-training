@@ -23,19 +23,31 @@ from minifield_training.core import json_io
 from minifield_training.core import parameters as core_parameters
 from minifield_training.kernels import types
 from minifield_training.optimizers import adamw
+from minifield_training.optimizers import schedule as lr_schedule
 from minifield_training.optimizers import state
 
 _IMPLEMENTATION_ID = "minifield.optax-adamw/1-skip-nonfinite"
 _INT32_MAX = np.iinfo(np.int32).max
 
 
-def implementation_identity(config: adamw.AdamWConfig) -> str:
-    """Bind checkpoints to this transaction, its settings, and optax."""
-    payload = {
+def implementation_identity(
+    config: adamw.AdamWConfig, schedule: lr_schedule.WarmupCosine | None = None
+) -> str:
+    """Bind checkpoints to this transaction, its settings, and optax.
+
+    A schedule joins the identity only when present, so constant-rate
+    checkpoints keep their existing identity.
+    """
+    payload: dict[str, object] = {
         "implementation": _IMPLEMENTATION_ID,
         "optax": optax.__version__,
         **dataclasses.asdict(config),
     }
+    if schedule is not None:
+        payload["schedule"] = {
+            "kind": "warmup-cosine/1",
+            **dataclasses.asdict(schedule),
+        }
     return hashlib.sha256(
         json_io.canonical(payload).encode("utf-8")
     ).hexdigest()
@@ -44,6 +56,7 @@ def implementation_identity(config: adamw.AdamWConfig) -> str:
 def make_transaction(
     inventory: core_parameters.FullParameterInventory,
     config: adamw.AdamWConfig,
+    schedule: lr_schedule.WarmupCosine | None = None,
 ) -> Callable[
     [state.State, types.Parameters, jax.Array, jax.Array], adamw.CommitResult
 ]:
@@ -52,12 +65,19 @@ def make_transaction(
     Gradients cover exactly the trainable leaves. Frozen masters and moments
     pass through unchanged. Decay follows each leaf's inventory flag.
     ``update_norm`` is reported as NaN; computing it would add a full pass.
+    With ``schedule``, the update at committed step ``n`` uses
+    ``learning_rate * schedule.factor(n)``; weight decay scales with it.
     """
     names = inventory.trainable_names
+    rate = (
+        config.learning_rate
+        if schedule is None
+        else lambda count: config.learning_rate * schedule.factor(count)
+    )
     optimizer = optax.chain(
         optax.clip_by_global_norm(config.clip_norm),
         optax.adamw(
-            config.learning_rate,
+            rate,
             b1=config.beta1,
             b2=config.beta2,
             eps=config.epsilon,

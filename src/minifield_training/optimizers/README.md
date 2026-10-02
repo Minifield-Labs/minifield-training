@@ -28,6 +28,15 @@ qualification remains unrun.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
+## Learning-rate schedule
+
+`schedule.WarmupCosine(warmup_updates, total_updates, final_fraction)` scales
+the rate by committed update: linear warm-up from `1 / warmup_updates`, then
+cosine decay to `final_fraction` at `total_updates`. Pass it to
+`optax_adamw.make_transaction` and `implementation_identity`; the identity
+changes only when a schedule is present. Tests compare 2 scheduled commits
+with the float64 oracle at the scheduled rates.
+
 ## Optional optax commit
 
 `optax_adamw.make_transaction(inventory, config)` is an opt-in alternative with

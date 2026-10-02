@@ -79,29 +79,58 @@ def _groups(weight: jax.Array) -> tuple[jax.Array, jax.Array]:
     return grouped, stored_scales.astype(jnp.float32)
 
 
-def _decoded(weight: jax.Array, kind: str) -> jax.Array:
-    """Decode the reference ternary or NF4 codes with stored-scale semantics."""
+def codes(weight: jax.Array, kind: str) -> tuple[jax.Array, jax.Array]:
+    """Return U8 ``[N, K]`` codebook indices and F16 ``[N, K/128]`` scales.
+
+    Ternary codes 0, 1, 2 mean -1, 0, +1; NF4 codes index the NF4 levels.
+    These are the runtime's ``minifield.ternary.v1`` and ``minifield.nf4.v1``
+    code meanings before bit packing.
+    """
     grouped, scales = _groups(weight)
     if kind == "ternary-g128-absmax-f16-v1":
         threshold = jnp.float32(0.5) * scales
-        values = jnp.where(
+        indices = jnp.where(
             scales == 0,
-            0.0,
+            1,
             jnp.where(
                 grouped >= threshold,
-                1.0,
-                jnp.where(grouped <= -threshold, -1.0, 0.0),
+                2,
+                jnp.where(grouped <= -threshold, 0, 1),
             ),
         )
     elif kind == "nf4-g128-absmax-f16-v1":
         normalized = jnp.where(scales == 0, 0.0, grouped / scales)
-        codes = jnp.zeros(normalized.shape, dtype=jnp.int32)
+        indices = jnp.zeros(normalized.shape, dtype=jnp.int32)
         for threshold in _NF4_TRANSITIONS:
-            codes = codes + (normalized >= threshold).astype(jnp.int32)
-        values = _NF4[codes]
+            indices = indices + (normalized >= threshold).astype(jnp.int32)
     else:
         raise ValueError("Unknown quantizer")
-    return (values * scales).reshape(weight.shape)
+    return (
+        indices.reshape(weight.shape).astype(jnp.uint8),
+        scales[..., 0].astype(jnp.float16),
+    )
+
+
+def decode(indices: jax.Array, scales: jax.Array, kind: str) -> jax.Array:
+    """Turn codes and F16 scales back into FP32 weights."""
+    if kind == "ternary-g128-absmax-f16-v1":
+        levels = jnp.asarray((-1.0, 0.0, 1.0), jnp.float32)
+    elif kind == "nf4-g128-absmax-f16-v1":
+        levels = _NF4
+    else:
+        raise ValueError("Unknown quantizer")
+    rows, columns = indices.shape
+    values = levels[indices.astype(jnp.int32)].reshape(
+        rows, columns // 128, 128
+    )
+    return (values * scales.astype(jnp.float32)[..., None]).reshape(
+        rows, columns
+    )
+
+
+def _decoded(weight: jax.Array, kind: str) -> jax.Array:
+    """Decode the reference ternary or NF4 codes with stored-scale semantics."""
+    return decode(*codes(weight, kind), kind)
 
 
 class Group128Quantizer:

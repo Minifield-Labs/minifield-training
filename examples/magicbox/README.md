@@ -32,7 +32,12 @@ same updates. Updates per epoch vary with the plan; the notebook prints the
 count and how full the rows are. `PACK = False` restores 1 request per row.
 `PREFETCH = 2` prepares 2 updates ahead on a background thread, and progress
 reports include `batch_wait_seconds`.
-Final evaluation reports every source separately.
+Final evaluation reports every source separately, for the dense model and,
+with `QUANTIZER`, its NF4 student. `WARMUP_UPDATES` and `FINAL_LR_FRACTION`
+set the learning-rate schedule; `ATTENTION`, `LOCAL_WINDOW` and
+`GLOBAL_EVERY` set the encoder's attention; `export.py` packages trimmed
+FP32 and NF4 device bundles at the end (see [the MagicBox
+guide](../../docs/magicbox.md#decoding-and-export)).
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
 `6e80c9c99a2840c1d863a7ed95e04bd31734f67e`. Set `DATASET` to a completed local
