@@ -17,6 +17,7 @@ from examples.magicbox import data as magicbox
 from examples.magicbox import smoke
 from examples.magicbox import source
 from examples.magicbox import tokenizer
+from examples.magicbox import train
 from minifield_training.batching import pointer as pointer_batching
 from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
@@ -27,10 +28,7 @@ from minifield_training.objectives import schema_fields as objective
 
 def test_consumer_contract_snapshot() -> None:
     """Pin the producer document and the consumer's versioned constants."""
-    root = (
-        Path(__file__).resolve().parents[2]
-        / "src/minifield_training/datasets/magicbox"
-    )
+    root = Path(__file__).resolve().parents[2] / "examples/magicbox"
     identity = json.loads((root / "format-v1.json").read_text())
     assert (
         identity["sha256"]
@@ -307,3 +305,18 @@ def test_corpus_reads_sources_and_samples_one_source(
         list(corpus.pointer_records("test", 2, source="roles"))
         == everything[:2]
     )
+
+
+def test_final_metrics_pool_sources_by_count() -> None:
+    """The pooled entry weights each source's mean by its own count."""
+    pooled = train.combine(
+        [
+            {"extract/exact": 1.0, "extract/exact/count": 30},
+            {
+                "extract/exact": 0.5,
+                "extract/exact/count": 10,
+                "choice/acc": 0.25,
+            },
+        ]
+    )
+    assert pooled == {"extract/exact": 0.875, "extract/exact/count": 40}

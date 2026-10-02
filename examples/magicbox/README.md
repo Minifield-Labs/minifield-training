@@ -88,8 +88,12 @@ python -m examples.magicbox.predict \
   --request /data/request.json
 ```
 
-`data.py` owns the published request/target format, schema wording, and public
-response formatting. `tokenizer.py` binds the pinned native tokenizer to shared
+`train.py` owns the run composition: settings, data and shape, run identity,
+state loading, per-source final evaluation, and bundle export. The notebook and
+the CLI both call it and differ only in settings and staging. `data.py` owns
+the published request/target format, schema wording, and public response
+formatting; [format-v1.md](format-v1.md) is the pinned producer format, with its
+revision and checksum in [format-v1.json](format-v1.json). `tokenizer.py` binds the pinned native tokenizer to shared
 offset normalization. `source.py` admits the published manifest and Arrow rows,
 then supplies ordering and compilation to the shared epoch stream.
 

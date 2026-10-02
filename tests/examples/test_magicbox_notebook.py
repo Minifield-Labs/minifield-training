@@ -103,15 +103,15 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
         OUTPUT=tmp_path,
         current={},
         update=object(),
-        dataclasses=SimpleNamespace(replace=lambda value, **_kwargs: value),
-        inventory=object(),
-        stream=SimpleNamespace(total_updates=300),
+        run=SimpleNamespace(
+            inventory=object(),
+            stream=SimpleNamespace(total_updates=300),
+            optimizer_id="test",
+            corpus=SimpleNamespace(pointer_records=lambda *_args: iter(())),
+        ),
         cursor=SimpleNamespace(next_batch=0),
         checkpoints=tmp_path,
-        optimizer=SimpleNamespace(implementation_identity="test"),
-        OPTIMIZER_ID="test",
         evaluator=SimpleNamespace(callback=lambda *_args: None),
-        corpus=SimpleNamespace(pointer_records=lambda *_args: iter(())),
         diagnostics=SimpleNamespace(
             monitor=lambda *_args: contextlib.nullcontext()
         ),
