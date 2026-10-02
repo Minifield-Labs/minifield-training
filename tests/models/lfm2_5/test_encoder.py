@@ -62,6 +62,47 @@ def test_encoder_reads_future_and_preserves_padding(bf16: bool) -> None:
     np.testing.assert_array_equal(padded[:, 4:], np.zeros((1, 3, 16)))
 
 
+@pytest.mark.parametrize("bf16", [False, True])
+def test_packed_segments_encode_as_separate_sequences(bf16: bool) -> None:
+    """Two packed sequences match their independently padded encodings."""
+    cfg, _, params = smoke.tiny()
+    first, second = [1, 5, 6, 7, 9], [1, 8, 3]
+    packed = jnp.asarray([first + second + [0, 0]])
+    segments = jnp.asarray([[1] * 5 + [2] * 3 + [0, 0]])
+    positions = jnp.asarray([list(range(5)) + list(range(3)) + [0, 0]])
+    actual = encoder.encode(
+        params,
+        cfg,
+        packed,
+        segments != 0,
+        bf16=bf16,
+        segment_ids=segments,
+        positions=positions,
+    )
+    separate = encoder.encode(
+        params,
+        cfg,
+        jnp.asarray([first, second + [0, 0]]),
+        jnp.asarray([[1] * 5, [1] * 3 + [0, 0]]),
+        bf16=bf16,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual[0, :5], dtype=np.float32),
+        np.asarray(separate[0], dtype=np.float32),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual[0, 5:8], dtype=np.float32),
+        np.asarray(separate[1, :3], dtype=np.float32),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_array_equal(actual[0, 8:], np.zeros((2, 16)))
+    with pytest.raises(ValueError, match="segment IDs and positions"):
+        encoder.encode(params, cfg, packed, segments != 0, segment_ids=segments)
+
+
 def test_encoder_owned_context_boundary() -> None:
     """Admit 8192 positions and reject 8193 before model computation."""
     cfg = model.Config(4, 8, 1, 1, 2, ("conv",))

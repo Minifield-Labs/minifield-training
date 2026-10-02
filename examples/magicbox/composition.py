@@ -51,10 +51,20 @@ def forward(
     encode = functools.partial(encoder.encode, cfg=cfg, bf16=bf16)
 
     def apply(
-        params: types.Parameters, ids: jax.Array, mask: jax.Array
+        params: types.Parameters,
+        ids: jax.Array,
+        mask: jax.Array,
+        segment_ids: jax.Array | None,
+        positions: jax.Array | None,
     ) -> jax.Array:
         """Bind the encoder's keyword config without copying parameters."""
-        return encode(params, ids=ids, mask=mask)
+        return encode(
+            params,
+            ids=ids,
+            mask=mask,
+            segment_ids=segment_ids,
+            positions=positions,
+        )
 
     return model.forward(parameters, fusion, apply, batch, training=training)
 

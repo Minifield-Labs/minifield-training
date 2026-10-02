@@ -46,6 +46,29 @@ The 67,108,864 token-embedding parameters are frozen, leaving 289,282,052
 trainable parameters. Frozen embeddings receive neither gradients nor decay.
 Their zero Adam moment slots remain allocated for checkpoint compatibility.
 
+### Packed schema rows
+
+The fixed training shape allows 256 schema rows of 512 tokens per request, but
+real requests are much smaller. On the one local source available offline
+(6,658 expanded requests, counted with an LFM2.5 tokenizer whose file differs
+from the pinned one, so treat these as estimates), a request has 7 schema rows
+at the median, 14 at p90, 21 at p99, and 34 at most. Rows run 47 tokens at the
+median and 77 at most, so a request holds 346 schema tokens at the median and
+1,558 at most. Encoding each row in its own padded 512-token pass spends over
+99% of schema encoder work on padding.
+
+Training therefore packs a request's schema rows end to end into
+`SCHEMA_SEQUENCES` encoder rows of 512 tokens. Segment IDs keep attention and
+convolution inside each schema row, and rotary positions restart per row, so
+every row encodes exactly as it would alone. Fusion still sees one
+`[rows, 512]` view per request, gathered from the packed encoder output. With
+`SCHEMA_SEQUENCES = None`, the notebook measures the most any record in any
+split needs before building the fixed shape. First-fit packing of the local
+source above needs 1 sequence at the median, 2 at p99, and 4 at most: 2,048
+schema tokens instead of 131,072. The shape stays fixed, so
+the training step still compiles once. The chosen count enters the checkpoint
+identity. Throughput on TPU is unmeasured.
+
 ## Dataset contract
 
 The dataset's consumer snapshot is

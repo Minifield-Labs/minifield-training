@@ -68,6 +68,8 @@ def _block(
     *,
     cfg: model.Config,
     kind: str,
+    segment_ids: jax.Array | None = None,
+    positions: jax.Array | None = None,
 ) -> jax.Array:
     """Compose the source's operator with the family's shared SwiGLU tail."""
     norm = normalization.rms_norm(
@@ -79,7 +81,7 @@ def _block(
             norm, weights.in_proj, mask
         )
         mixed = c_gate * bidirectional.centered_convolution(
-            b_gate * values, weights.conv.astype(hidden.dtype)
+            b_gate * values, weights.conv.astype(hidden.dtype), segment_ids
         )
         residual = linear.full_linear(mixed, weights.out)
     else:
@@ -88,12 +90,18 @@ def _block(
             norm, weights_attn, head_dim=cfg.head_dim, eps=cfg.norm_eps
         )
         query = rotary.apply_rotary(
-            query, rope_theta=cfg.rope_theta, head_dim=cfg.head_dim
+            query,
+            rope_theta=cfg.rope_theta,
+            head_dim=cfg.head_dim,
+            positions=positions,
         )
         key = rotary.apply_rotary(
-            key, rope_theta=cfg.rope_theta, head_dim=cfg.head_dim
+            key,
+            rope_theta=cfg.rope_theta,
+            head_dim=cfg.head_dim,
+            positions=positions,
         )
-        mixed = bidirectional.attention(query, key, value, mask)
+        mixed = bidirectional.attention(query, key, value, mask, segment_ids)
         residual = linear.full_linear(
             mixed.reshape(hidden.shape), weights_attn.out
         )
@@ -107,6 +115,8 @@ def _scan_blocks(
     mask: jax.Array,
     params: Mapping[str, jax.Array],
     cfg: model.Config,
+    segment_ids: jax.Array | None = None,
+    positions: jax.Array | None = None,
 ) -> jax.Array:
     """Keep one compiled block per operator kind, with distinct layer weights.
 
@@ -162,7 +172,13 @@ def _scan_blocks(
                     for name, values in operators[kind].items()
                 }
                 return _block(
-                    activation, mask, {**shared, **selected}, cfg=cfg, kind=kind
+                    activation,
+                    mask,
+                    {**shared, **selected},
+                    cfg=cfg,
+                    kind=kind,
+                    segment_ids=segment_ids,
+                    positions=positions,
                 )
 
             return apply
@@ -190,8 +206,16 @@ def encode(
     mask: jax.Array,
     *,
     bf16: bool = True,
+    segment_ids: jax.Array | None = None,
+    positions: jax.Array | None = None,
 ) -> jax.Array:
-    """Encode complete tokens, rematerializing blocks during reverse mode."""
+    """Encode complete tokens, rematerializing blocks during reverse mode.
+
+    Packed rows pass ``segment_ids`` (0 for padding, matching ``mask``) and
+    per-segment ``positions`` together. Each segment then encodes exactly as
+    it would alone: attention, convolution taps, and rotary positions stop at
+    segment boundaries.
+    """
     if (
         ids.ndim != 2
         or mask.shape != ids.shape
@@ -200,9 +224,14 @@ def encode(
         raise ValueError(
             "Encoder input shape or trained context limit violated"
         )
+    if (segment_ids is None) != (positions is None) or any(
+        value is not None and value.shape != ids.shape
+        for value in (segment_ids, positions)
+    ):
+        raise ValueError("Packed segment IDs and positions must match ids")
     dtype = jnp.bfloat16 if bf16 else jnp.float32
     hidden = params["lfm2.embed_tokens.weight"][ids].astype(dtype)
-    hidden = _scan_blocks(hidden, mask, params, cfg)
+    hidden = _scan_blocks(hidden, mask, params, cfg, segment_ids, positions)
     return (
         normalization.rms_norm(
             hidden, params["lfm2.embedding_norm.weight"], cfg.norm_eps

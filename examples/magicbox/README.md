@@ -28,7 +28,10 @@ By default, both modes download `protodotdesign/magicbox-v1` at revision
 directory to use an attached dataset. Both modes keep the dataset's full
 fixed training dimensions: 1,024 source tokens, 512 schema tokens, and 256
 schema rows per request. Records and final partial batches are padded to these
-limits; the gradient input shape stays constant. Both modes freeze the
+limits; the gradient input shape stays constant. Schema rows are packed into
+`SCHEMA_SEQUENCES` encoder rows of 512 tokens per request. With the default
+`None`, the notebook measures the most any record in any split needs before
+building the shape, so the encoder runs on those tokens instead of 256 × 512. Both modes freeze the
 pretrained token embeddings while
 training the remaining 289,282,052 parameters.
 

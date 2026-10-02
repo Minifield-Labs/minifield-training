@@ -15,7 +15,7 @@ def _signature(
     batch: types.DeviceBatch,
     context: tuple[str, ...],
 ) -> tuple[object, ...]:
-    """Bind weights, tokenizer/template/precision revisions, IDs, and masks.
+    """Bind weights, revisions, and the packed schema encoder inputs.
 
     JAX arrays are immutable. Leaf identities reject any replaced encoder
     parameter without reading 1.4 GB of weight bytes on every lookup. This
@@ -27,7 +27,11 @@ def _signature(
         if not name.startswith("magicbox.")
     )
     digest = hashlib.sha256()
-    for name in ("schema_ids", "schema_mask"):
+    for name in (
+        "packed_schema_ids",
+        "packed_schema_segments",
+        "packed_schema_positions",
+    ):
         value = np.asarray(batch[name])
         digest.update(str((value.shape, value.dtype)).encode())
         digest.update(value.tobytes())
@@ -55,11 +59,7 @@ class SchemaCache:
             raise ValueError(
                 "Cache requires tokenizer/template/precision revisions"
             )
-        ids, mask = batch["schema_ids"], batch["schema_mask"]
-        length = ids.shape[-1]
-        hidden = encode(
-            parameters, ids.reshape(-1, length), mask.reshape(-1, length)
-        )
+        hidden = model.encode_schema(parameters, encode, batch)
         return cls(
             _signature(parameters, batch, context),
             jax.lax.stop_gradient(hidden),

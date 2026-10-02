@@ -50,6 +50,8 @@ Every block rematerializes in reverse mode. Flat FP32 masters, checkpoint
 names, and optimizer state retain their existing format. It doesn't
 construct or load an unused vocabulary head. `encoder.MAX_SEQUENCE_LENGTH`
 owns its admitted 8,192-token limit independently of the source RoPE metadata.
+Passing `segment_ids` and per-segment `positions` together encodes packed rows;
+each segment matches its separately padded encoding in FP32 and BF16 CPU tests.
 
 `magicbox.model` accepts an injected shared encoder callable. Source tokens
 are encoded once per request; independent schema rows read the resulting
@@ -57,18 +59,25 @@ source memory through 2 pre-norm fusion blocks. Defaults are width 256,
 4 heads, FFN multiplier 2, dropout 0.1, and extraction match width 128.
 One scalar candidate head serves both choice and score. Separate binary and
 presence heads and token-membership logits complete the four output types.
-Schema rows run in chunks without detaching either encoder path.
+Schema rows are encoded packed: `model.encode_schema` encodes every request's
+packed sequences, `row_chunk` at a time, so `row_chunk` still bounds schema
+encoder concurrency. Each fusion row gathers its tokens from the packed
+projection inside the chunked row map, so the padded `[rows, schema_tokens]`
+view never exists for all rows at once. The encoder callable takes
+`(params, ids, mask, segment_ids, positions)`; source encoding passes `None`
+for both. Fusion rows run in chunks without detaching either encoder path.
 
 `magicbox.cache.SchemaCache` caches pre-projection schema token outputs for
 inference. Call `get` before JIT tracing, supplying tokenizer, template, and
-precision revisions in `context`. It binds schema IDs/masks and immutable
+precision revisions in `context`. It binds packed schema inputs and immutable
 encoder leaf identities, rejects replaced weights, and isn't serializable.
 Pass the validated result as `schema_hidden` to the model. Training rejects
 that argument. Fusion-only updates don't invalidate pre-projection caches.
 
 CPU checks cover published tensor shapes, noncausal behavior, FP32/BF16
 padding, shared gradients, permutation, 2/3/17/65 candidates, row chunking,
-and cache rejection. Repeated and interleaved operator layouts also compare
+cache rejection, and packed versus one-row-per-sequence outputs and every
+master gradient. Repeated and interleaved operator layouts also compare
 outputs and every master gradient with the former unrolled schedule in FP32
 and BF16. That comparison disables CPU excess precision to enforce the
 declared BF16 rounding in both graphs. See

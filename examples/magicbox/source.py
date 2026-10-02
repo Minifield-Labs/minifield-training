@@ -12,6 +12,7 @@ import datasets  # type: ignore[import-untyped]
 from examples.magicbox import data as magicbox
 from examples.magicbox import tokenizer
 from minifield_training.artifacts import files
+from minifield_training.batching import packing
 from minifield_training.batching import schema_fields as batching
 from minifield_training.batching import stream
 from minifield_training.core import json_io
@@ -113,6 +114,43 @@ class Corpus:
         if not any(field.supervised for field in record.fields):
             raise ValueError("no_supervision")
         return record
+
+    def packed_sequences(
+        self, splits: Sequence[str], schema_tokens: int
+    ) -> int:
+        """Return the most packed schema rows any record in ``splits`` needs.
+
+        Row text is batch-tokenized with the saved tokenizer. Sources, spans,
+        and targets are checked later, when training compiles each record.
+        """
+        required = 0
+        for split in splits:
+            columns = self.split(split).select_columns(
+                ["request_json", "targets_json"]
+            )
+            for chunk in columns.iter(batch_size=1024):
+                rows = [
+                    magicbox.labeled_schema_rows(
+                        json.loads(request), json.loads(targets)
+                    )
+                    for request, targets in zip(
+                        chunk["request_json"],
+                        chunk["targets_json"],
+                        strict=True,
+                    )
+                ]
+                encoded = iter(
+                    self.tokenizer.tokenizer.encode_batch(
+                        [text for texts in rows for text in texts],
+                        add_special_tokens=True,
+                    )
+                )
+                for texts in rows:
+                    lengths = [len(next(encoded).ids) for _ in texts]
+                    required = max(
+                        required, packing.rows_required(lengths, schema_tokens)
+                    )
+        return required
 
     def records(self, split: str, limit: int) -> Iterator[fields.Record]:
         """Apply the experiment's fixed held-out sampling policy."""

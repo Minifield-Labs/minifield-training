@@ -4,13 +4,18 @@ import dataclasses
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
+import datasets  # type: ignore[import-untyped]
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from examples.magicbox import data as magicbox
 from examples.magicbox import smoke
+from examples.magicbox import source
+from examples.magicbox import tokenizer
 from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
@@ -140,3 +145,77 @@ def test_absent_and_presence_only_extractions() -> None:
         magicbox.schema_rows(
             {"type": "choice", "instructions": "", "criteria": {"x": "X"}}
         )
+
+
+_REQUEST = {
+    "state": "Ada paid 5.",
+    "questions": {
+        "name": {"type": "extract", "instructions": "Name."},
+        "tier": {
+            "type": "choice",
+            "instructions": "Tier.",
+            "criteria": {"gold": "Top", "basic": "Entry"},
+        },
+        "mood": {
+            "type": "score",
+            "instructions": "Mood.",
+            "criteria": ["Low", "Mid", "High"],
+        },
+    },
+}
+
+
+def test_labeled_schema_rows_skip_unlabeled_questions() -> None:
+    """Training encodes rows only for questions that carry supervision."""
+    rows = magicbox.labeled_schema_rows(
+        _REQUEST, {"tier": {"value": "gold"}, "mood": {"value": 1}}
+    )
+    assert rows == (
+        "Type: choice\nQuestion: Tier.\nCandidate: gold\nDescription: Top",
+        "Type: choice\nQuestion: Tier.\nCandidate: basic\nDescription: Entry",
+        "Type: score\nQuestion: Mood.\nLevel: 0 of 3 levels, indexed from 0"
+        "\nDescription: Low",
+        "Type: score\nQuestion: Mood.\nLevel: 1 of 3 levels, indexed from 0"
+        "\nDescription: Mid",
+        "Type: score\nQuestion: Mood.\nLevel: 2 of 3 levels, indexed from 0"
+        "\nDescription: High",
+    )
+
+
+class _WordTokenizer:
+    """Count BOS plus whitespace words, standing in for the pinned tokenizer."""
+
+    def encode_batch(
+        self, texts: list[str], add_special_tokens: bool
+    ) -> list[SimpleNamespace]:
+        assert add_special_tokens
+        return [
+            SimpleNamespace(ids=[1] * (1 + len(text.split()))) for text in texts
+        ]
+
+
+def test_corpus_measures_packed_sequences_across_splits() -> None:
+    """The scan packs each record's labeled rows and keeps the maximum."""
+    corpus = object.__new__(source.Corpus)
+    corpus.tokenizer = cast(
+        tokenizer.Adapter, SimpleNamespace(tokenizer=_WordTokenizer())
+    )
+    labels = json.dumps({"tier": {"value": "gold"}, "mood": {"value": 1}})
+    one_field = json.dumps({"name": {"value": None}})
+    corpus._splits = {  # pylint: disable=protected-access
+        split: datasets.Dataset.from_dict(
+            {
+                "request_json": [json.dumps(_REQUEST)] * len(targets),
+                "targets_json": targets,
+            }
+        )
+        for split, targets in (
+            ("train", [one_field, labels]),
+            ("validation", [one_field]),
+        )
+    }
+    # Choice rows count 9 tokens and score rows 15. At 20 tokens each score
+    # row needs its own row and both choices share one; 24 fits [15, 9] twice.
+    assert corpus.packed_sequences(("train",), 20) == 4
+    assert corpus.packed_sequences(("validation",), 20) == 1
+    assert corpus.packed_sequences(("validation", "train"), 24) == 3

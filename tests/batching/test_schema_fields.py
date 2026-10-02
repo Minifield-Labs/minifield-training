@@ -364,3 +364,87 @@ def test_rejects_contradictory_extraction_supervision(
             update=0,
             weighting=_uniform,
         )
+
+
+def test_short_rows_share_packed_encoder_sequences() -> None:
+    """Six 2-token rows fill three 4-token encoder rows and gather back."""
+    shape = schema_fields.Shape(2, 2, 5, 4, 7, 11, 10, schema_sequences=3)
+    arrays = schema_fields.build(
+        [_record()], shape, seed=3, update=4, weighting=_uniform
+    ).microbatches
+    np.testing.assert_array_equal(
+        arrays["packed_schema_ids"][0, 0],
+        [[8, 1, 8, 2], [8, 3, 8, 4], [8, 5, 8, 6]],
+    )
+    np.testing.assert_array_equal(
+        arrays["packed_schema_segments"][0, 0],
+        [[1, 1, 2, 2], [3, 3, 4, 4], [5, 5, 6, 6]],
+    )
+    np.testing.assert_array_equal(
+        arrays["packed_schema_positions"][0, 0], [[0, 1, 0, 1]] * 3
+    )
+    np.testing.assert_array_equal(
+        arrays["schema_token_index"][0, 0],
+        [[0, 1, 0, 0], [2, 3, 0, 0], [4, 5, 0, 0], [6, 7, 0, 0]]
+        + [[8, 9, 0, 0], [10, 11, 0, 0], [0, 0, 0, 0]],
+    )
+    gathered = arrays["packed_schema_ids"][0, 0].reshape(-1)[
+        arrays["schema_token_index"][0, 0]
+    ]
+    mask = arrays["schema_mask"][0, 0]
+    np.testing.assert_array_equal(
+        gathered * mask, arrays["schema_ids"][0, 0] * mask
+    )
+    assert np.all(arrays["packed_schema_ids"][:, 1] == 10)
+    assert not np.any(arrays["packed_schema_segments"][:, 1])
+    with pytest.raises(ValueError, match="exceeds configured batch shape"):
+        schema_fields.build(
+            [_record()],
+            dataclasses.replace(shape, schema_sequences=2),
+            seed=3,
+            update=4,
+            weighting=_uniform,
+        )
+
+
+@pytest.mark.parametrize(("min_tokens", "sequences"), [(1, 8), (4, 4)])
+def test_bucketing_counts_packed_sequences_at_the_row_bucket(
+    min_tokens: int, sequences: int
+) -> None:
+    """2-token rows need 6 rows of 2 tokens or 3 rows of 4 tokens."""
+    shape = schema_fields.Shape(1, 1, 8, 8, 8, 11, 10, schema_sequences=8)
+    bucketed = schema_fields.bucket([_record()], shape, min_tokens=min_tokens)
+    assert bucketed.schema_sequences == sequences
+    assert bucketed.packed_sequences == sequences
+    default = schema_fields.bucket(
+        [_record()],
+        dataclasses.replace(shape, schema_sequences=None),
+        min_tokens=min_tokens,
+    )
+    assert default.schema_sequences is None
+    assert default.packed_sequences == default.schema_rows == 8
+
+
+def test_bucketing_widens_packed_rows_before_rejecting() -> None:
+    """10 rows of 64 tokens fit 4 x 512; bucketing widens rows to fit."""
+    wide = _binary_record("wide")
+    rows = dataclasses.replace(
+        wide.fields[0],
+        kind=fields.Kind.CHOICE,
+        candidates=tuple(str(index) for index in range(10)),
+        rows=tuple((8, *([index + 1] * 63)) for index in range(10)),
+        targets=(1.0,) + (0.0,) * 9,
+    )
+    record = dataclasses.replace(wide, fields=(rows,))
+    shape = schema_fields.Shape(1, 1, 8, 512, 16, 11, 10, schema_sequences=4)
+    bucketed = schema_fields.bucket([record], shape)
+    # 64-token rows need 10 sequences and 128 need 5; 256 need 3 (bucket 4).
+    assert (bucketed.schema_tokens, bucketed.schema_sequences) == (256, 4)
+    narrow = schema_fields.bucket(
+        [record], dataclasses.replace(shape, schema_sequences=2)
+    )
+    assert (narrow.schema_tokens, narrow.schema_sequences) == (512, 2)
+    with pytest.raises(ValueError, match="limit is 1"):
+        schema_fields.bucket(
+            [record], dataclasses.replace(shape, schema_sequences=1)
+        )
