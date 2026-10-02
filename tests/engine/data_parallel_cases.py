@@ -74,18 +74,28 @@ def _batch() -> dict[str, jax.Array]:
     return {"x": jnp.asarray(values), "mask": jnp.asarray(masks)}
 
 
-@pytest.mark.parametrize("fused", [False, True])
-def test_global_weighting_and_replicated_state(fused: bool) -> None:
+def _update(
+    engine: str, inventory: parameters.FullParameterInventory, **options: float
+) -> step.StreamingStep | step.JitStep:
+    """Build either engine over the shared 8-device data mesh."""
+    optimizer = adamw.AdamWConfig(0.1, **options)
+    if engine == "jit":
+        return step.make_jit_step(_terms, inventory, optimizer, mesh=_mesh())
+    return step.make_streaming_step(
+        _terms,
+        inventory,
+        optimizer,
+        mesh=_mesh(),
+        fuse_accumulation=engine == "fused",
+    )
+
+
+@pytest.mark.parametrize("engine", ["streaming", "fused", "jit"])
+def test_global_weighting_and_replicated_state(engine: str) -> None:
     """Independent affine-model math checks reduction and one Adam commit."""
     inventory, initial = _setup()
     mesh = _mesh()
-    update = step.make_streaming_step(
-        _terms,
-        inventory,
-        adamw.AdamWConfig(0.1, clip_norm=100),
-        mesh=mesh,
-        fuse_accumulation=fused,
-    )
+    update = _update(engine, inventory, clip_norm=100)
     result = update(
         _replicate(initial, mesh), _batch(), np.array([True, True, False])
     )
@@ -110,14 +120,13 @@ def test_global_weighting_and_replicated_state(fused: bool) -> None:
             np.testing.assert_array_equal(shard.data, leaf)
 
 
+@pytest.mark.parametrize("engine", ["streaming", "jit"])
 @pytest.mark.parametrize("failure", ["negative", "nan", "loss", "empty"])
-def test_bad_replica_rejects_entire_update(failure: str) -> None:
+def test_bad_replica_rejects_entire_update(failure: str, engine: str) -> None:
     """One invalid shard cannot hide behind another shard's positive count."""
     inventory, initial = _setup()
-    expected = jax.tree.map(np.asarray, initial)
-    update = step.make_streaming_step(
-        _terms, inventory, adamw.AdamWConfig(0.1), mesh=_mesh()
-    )
+    expected = jax.tree.map(lambda value: np.asarray(value).copy(), initial)
+    update = _update(engine, inventory)
     batch = _batch()
     if failure == "negative":
         batch["mask"] = batch["mask"].at[0, 4].set(-0.5)
@@ -153,20 +162,19 @@ def test_shape_and_device_admission() -> None:
             adamw.AdamWConfig(0.1),
             mesh=jax.sharding.Mesh(np.asarray(jax.devices()), ("wrong",)),
         )
-    update = step.make_streaming_step(
-        _terms, inventory, adamw.AdamWConfig(0.1), mesh=_mesh()
-    )
-    with pytest.raises(ValueError, match="divisible"):
-        update(initial, {"x": jnp.ones((1, 3))}, np.array([True]))
+    for engine in ("streaming", "jit"):
+        with pytest.raises(ValueError, match="divisible"):
+            _update(engine, inventory)(
+                initial, {"x": jnp.ones((1, 3))}, np.array([True])
+            )
 
 
-def test_runner_checkpoint_resume(tmp_path: Path) -> None:
+@pytest.mark.parametrize("engine", ["streaming", "jit"])
+def test_runner_checkpoint_resume(tmp_path: Path, engine: str) -> None:
     """Restored replicated training equals uninterrupted next-update state."""
     inventory, initial = _setup()
     optimizer = adamw.AdamWConfig(0.1, clip_norm=100)
-    update = step.make_streaming_step(
-        _terms, inventory, optimizer, mesh=_mesh()
-    )
+    update = _update(engine, inventory, clip_norm=100)
     cursor = training_state.Cursor("parallel", "data", "source", 0)
     starts: list[int] = []
 

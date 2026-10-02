@@ -1,8 +1,10 @@
 """Bounded single-host lifecycle over caller-supplied batch strategies."""
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextlib import nullcontext
 import dataclasses
+import functools
 import math
 from pathlib import Path
 import time
@@ -20,6 +22,41 @@ type Evaluator = Callable[[state.State, int], Mapping[str, float]]
 type Reporter = Callable[[dict[str, float | str]], None]
 
 _now: Callable[[], float] = time.monotonic
+_COMPILE_EVENT = "/jax/core/compile/backend_compile_duration"
+_compile_recorders: list[list[str]] = []
+
+
+def _record_compile(
+    event: str, duration_secs: float, **kwargs: str | int
+) -> None:
+    """Forward each XLA backend compile's program name to active recorders."""
+    del duration_secs
+    if event == _COMPILE_EVENT:
+        for recorder in _compile_recorders:
+            recorder.append(str(kwargs.get("fun_name", "unknown")))
+
+
+@functools.cache
+def _listen_for_compiles() -> None:
+    """Register once; JAX 0.7.2 has no public way to remove a listener."""
+    jax.monitoring.register_event_duration_secs_listener(_record_compile)
+
+
+@contextmanager
+def _compile_guard(enabled: bool, update: int) -> Iterator[None]:
+    """Raise after the block, naming any programs it compiled while enabled."""
+    _listen_for_compiles()
+    names: list[str] = []
+    _compile_recorders.append(names)
+    try:
+        yield
+    finally:
+        _compile_recorders.remove(names)
+    if enabled and names:
+        raise RuntimeError(
+            f"Update {update} compiled {sorted(set(names))}; updates after "
+            "the first must reuse their compiled programs"
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -75,10 +112,15 @@ def require_devices(
 
 
 def _state_placement(
-    update: step.LogicalStep | step.StreamingStep, platform: str | None
+    update: step.LogicalStep | step.StreamingStep | step.JitStep,
+    platform: str | None,
 ) -> jax.Device | jax.sharding.NamedSharding:
     """Admit the step's device topology and place one logical state."""
-    mesh = update.mesh if isinstance(update, step.StreamingStep) else None
+    mesh = (
+        update.mesh
+        if isinstance(update, step.StreamingStep | step.JitStep)
+        else None
+    )
     if mesh is None:
         return require_single_device(platform)
     devices = require_devices(mesh.size, platform)
@@ -145,7 +187,7 @@ def _epoch_update_count[RecordT](
 def run[RecordT](
     examples: Sequence[RecordT] | None,
     initial_state: state.State,
-    update: step.LogicalStep | step.StreamingStep,
+    update: step.LogicalStep | step.StreamingStep | step.JitStep,
     inventory: core_parameters.FullParameterInventory,
     config: RunConfig,
     *,
@@ -158,6 +200,7 @@ def run[RecordT](
     annotate_steps: bool = False,
     batch_strategy: batching.BatchStrategy[RecordT] | None = None,
     batch_source: batching.BatchSource | None = None,
+    strict_compiles: bool = False,
 ) -> tuple[state.State, training_state.Cursor]:
     """Compile and run bounded updates, saving after committed boundaries.
 
@@ -166,6 +209,11 @@ def run[RecordT](
     deterministic, non-repeating updates until the run bound is reached. Only
     one logical update's arrays are transferred at a time. The caller provides
     persistent checkpoints and optional gameplay evaluation.
+
+    With ``strict_compiles``, any XLA compilation during an update after the
+    invocation's first raises and names the program. A changed batch shape,
+    dtype, or placement then fails loudly instead of silently recompiling.
+    Evaluation and checkpoint callbacks aren't checked.
     """
     placement = _state_placement(update, required_platform)
     updates_per_epoch = _epoch_update_count(
@@ -182,7 +230,9 @@ def run[RecordT](
     if int(initial_state["step"]) != cursor.next_batch:
         raise ValueError("Optimizer step and data cursor disagree")
     compiled = (
-        update if isinstance(update, step.StreamingStep) else jax.jit(update)
+        update
+        if isinstance(update, step.StreamingStep | step.JitStep)
+        else jax.jit(update)
     )
     # Loaded arrays may be physically on this device but uncommitted. The
     # first JIT result is committed; starting committed keeps one compilation
@@ -235,7 +285,12 @@ def run[RecordT](
                     if annotate_steps
                     else nullcontext()
                 )
-                with annotation:
+                with (
+                    annotation,
+                    _compile_guard(
+                        strict_compiles and committed > 0, cursor.next_batch + 1
+                    ),
+                ):
                     result = compiled(current, batch.microbatches, batch.active)
                 update_seconds = _now() - update_started
                 if not bool(result.committed):

@@ -28,6 +28,20 @@ equivalence, an analytical gradient, frozen state, invalid inputs, and eager/JIT
 agreement. CUDA and mixed-device performance remain unqualified. Checkpoints,
 epoch scheduling and packed-batch construction aren't part of `step`.
 
+`step.make_jit_step(loss_terms, inventory, adamw_config, mesh=None)` compiles
+that update as one donated program and returns a `JitStep`. Gradients,
+microbatch accumulation, normalization, and the AdamW commit share one
+executable, so full gradient trees never cross a program boundary. The state
+argument is consumed; continue from `CommitResult.state` after committed and
+rejected updates. Commit state placement before the first call (the runner
+does this) so later updates reuse one executable. `JitStep.gradient` is a
+separately compiled physical gradient for diagnostics; training never calls
+it. `make_step(..., mesh=mesh)` and `make_jit_step(..., mesh=mesh)` split
+physical rows exactly like the streaming form below. MagicBox training uses
+this engine. CPU tests cover analytical values, donation, exact rejection,
+one compilation across updates, and 8-device equivalence. TPU compilation
+memory and throughput remain unmeasured.
+
 `step.make_streaming_step` keeps the same loss/count and AdamW contract for a
 single-device run, but compiles one physical gradient, device-side addition,
 normalization, and donated commit as separate programs. The host selects active
@@ -37,6 +51,13 @@ The training runner calls this form directly when supplied a streaming step;
 other logical steps retain the scanned JIT path.
 The donated optimizer consumes its input buffers, including on a rejected
 commit. Continue from the returned `CommitResult.state` in either case.
+
+Pass `strict_compiles=True` to `training_run.run` to fail on silent
+recompilation. Any XLA compile during an update after the invocation's first
+raises `RuntimeError` naming the compiled programs, so a changed batch shape,
+dtype, or placement can't quietly add minutes and host memory mid-run.
+Evaluation and checkpoint callbacks aren't checked. The listener uses JAX's
+public monitoring events and is registered once per process.
 
 The training runner reports the first update's wall time separately because
 it can include compilation. `warm_updates_per_second` divides later committed
@@ -56,15 +77,15 @@ coverage, but its v5e memory peak and speed remain unmeasured.
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 
 `training_run.run` is the bounded single-host lifecycle for
-caller-supplied supervision. It JIT-compiles a scanned logical update or calls
-the already compiled stages of a streaming update,
+caller-supplied supervision. It JIT-compiles a scanned logical update, calls a
+compiled `JitStep`, or calls the already compiled stages of a streaming update,
 consumes physical updates through batching protocols, checkpoints the complete
 state after committed updates, and resumes deterministic epoch shuffles from
 the saved global next-batch cursor. `max_steps` and/or `max_seconds` bound each
 invocation. An optional callback runs at checkpoint boundaries for product
 gameplay; its metrics and a report callback are caller-owned. The default
-requires one visible device; a streaming step's optional mesh must contain
-all visible devices on one host. A requested platform must match every device.
+requires one visible device; a streaming or JIT step's optional mesh must
+contain all visible devices on one host. A requested platform must match every device.
 The caller
 supplies an explicit persistent checkpoint path. CPU tests cover save/restore,
 cursor advance, callback boundaries, and TPU absence. TPU compilation,
@@ -113,5 +134,5 @@ For a diagnostic run, replace a streaming step's `report_phase` with a callback
 accepting a phase name. Gradient, accumulation, normalization, and optimizer
 begin/end markers synchronize pending results at their boundaries. The runner
 also identifies state validation and batch readiness. The default callback is
-absent, so normal training has no added synchronization. The TPU notebook
-enables these markers only for its two-update preflight.
+absent, so normal training has no added synchronization. A `JitStep` has no
+internal boundaries to mark; MagicBox's notebook compiles it ahead of time.

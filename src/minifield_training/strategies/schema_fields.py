@@ -17,7 +17,7 @@ def make_step(
     optimizer: adamw.AdamWConfig,
     *,
     mesh: jax.sharding.Mesh | None = None,
-) -> step.StreamingStep:
+) -> step.JitStep:
     """Bind task loss to a supplied training forward and parameter inventory."""
 
     def loss_terms(
@@ -25,4 +25,4 @@ def make_step(
     ) -> tuple[jax.Array, jax.Array]:
         return objective.terms(forward(params, batch), batch)
 
-    return step.make_streaming_step(loss_terms, inventory, optimizer, mesh=mesh)
+    return step.make_jit_step(loss_terms, inventory, optimizer, mesh=mesh)

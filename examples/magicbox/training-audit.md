@@ -52,12 +52,12 @@ to admit v1 bundles using their original inventory.
 | Backbone | LFM2.5 Base, causal | LFM2.5 Encoder 350M, bidirectional; intentionally different architecture |
 | Encoder work | 1 encoding per decision row | 1 source encoding per request plus 1 encoding per schema row, then fusion |
 | Physical batch | 16 decisions across 8 devices | 8 requests across 8 devices; request work varies with schema rows |
-| Accumulation | 4 microbatches | 4 full-run microbatches; smoke uses 1; both use the same streaming update |
+| Accumulation | 4 microbatches | 4 full-run microbatches; smoke uses 1; accumulation is scanned inside one compiled update |
 | Sequence shapes | Fixed 512 tokens | Fixed source 1,024, schema 512, rows 256; former recipe allowed up to 84 gradient shapes |
 | Precision | BF16 computation, FP32 masters, gradients, moments | Same; fusion norms and objective reductions use FP32 where required |
 | Rematerialization | Encoder blocks checkpointed | Encoder scan body and schema rows checkpointed; extra schema work remains |
 | Attention | Dense causal attention | Dense bidirectional attention through JAX's XLA implementation; CPU oracle tests cover its outputs and gradients |
-| Gradient/optimizer boundary | Separate compiled programs | Same shared implementation; compiling the gradient alone doesn't compile normalization or AdamW |
+| Gradient/optimizer boundary | Separate compiled programs | One donated program; the notebook compiles gradient, normalization, and AdamW together before training |
 | Accumulation fusion | Opt-in, default off | Off, same default; no full-state optimizer wrapped around the model gradient |
 | AdamW | Betas 0.9/0.95, epsilon 1e-8, decay 0.01, clip 1 | Same; task-specific learning rate 2e-5 instead of 1e-4 |
 | Learning-rate schedule | Constant | Constant; no missing scheduler or warmup relative to this baseline |
@@ -96,10 +96,11 @@ Checkpoint saving and validation evaluation occur after this event. They
 cannot explain this particular first-update failure. A later undefined
 `diagnostics` variable reflects the restarted kernel losing its namespace.
 
-Preflight now reports synchronized gradient, normalization, and optimizer
-boundaries. Normal training leaves this diagnostic callback disabled. Local
-CPU execution confirmed that explicit gradient compilation can be reused by
-the streaming update; that alone doesn't establish TPU cache/layout reuse.
+A later preflight reported synchronized gradient, normalization, and optimizer
+boundaries, and reached 45 GB of host RAM inside the first AdamW call. MagicBox
+now compiles those phases as one donated program, which the notebook compiles
+ahead of time. A CPU test confirms that the first update reuses that
+executable; that alone doesn't establish TPU cache/layout reuse.
 
 Local Docker ran the actual pinned JAX 0.7.2 / libtpu 0.0.23 compiler against a
 compile-only `v5e:1x1` topology without TPU hardware. The full-size gradient and

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from minifield_training.batching import classification as batching
@@ -837,3 +838,56 @@ def test_step_annotations_leave_profile_capture_to_caller(
         annotate_steps=True,
     )
     assert steps == [1, 2, 3, 4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("change_shape", [False, True])
+def test_strict_compiles_name_a_recompiled_update(
+    tmp_path: Path, change_shape: bool
+) -> None:
+    """Constant batches reuse one program; a new width at update 3 raises."""
+    inventory = parameters.build_inventory(
+        {"weight": (1,)}, format_id="runner/1", decayed_names=frozenset()
+    )
+    initial = adamw.initialize_state(
+        {"weight": jnp.zeros((1,), dtype=jnp.float32)}, inventory
+    )
+
+    def terms(
+        params: dict[str, jax.Array], batch: dict[str, jax.Array]
+    ) -> tuple[jax.Array, jax.Array]:
+        """Use every input column so a wider batch changes the program."""
+        return params["weight"][0] * jnp.sum(batch["x"]), jnp.float32(1)
+
+    def source(
+        start: int, unused_deadline: float | None
+    ) -> Iterator[contracts.PhysicalUpdate]:
+        """Widen only the third update when requested."""
+        for index in range(start, 3):
+            width = 3 if change_shape and index == 2 else 2
+            yield contracts.PhysicalUpdate(
+                {"x": jnp.ones((1, width), dtype=jnp.float32)},
+                np.asarray([True]),
+                (str(index),),
+            )
+
+    def run() -> tuple[state.State, training_state.Cursor]:
+        return training_run.run(
+            None,
+            initial,
+            step.make_jit_step(terms, inventory, adamw.AdamWConfig(0.01)),
+            inventory,
+            training_run.RunConfig(0, 10, 1, max_steps=3),
+            checkpoint_root=tmp_path,
+            optimizer_id="optimizer",
+            cursor=training_state.Cursor("run", "data", "source", 0),
+            required_platform="cpu",
+            batch_source=source,
+            strict_compiles=True,
+        )
+
+    if change_shape:
+        with pytest.raises(RuntimeError, match=r"Update 3 compiled \[.*step"):
+            run()
+    else:
+        _, cursor = run()
+        assert cursor.next_batch == 3

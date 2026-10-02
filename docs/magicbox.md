@@ -6,7 +6,7 @@ installing locked dependencies into the Python 3.12 or 3.13 notebook kernel.
 Select a single-host TPU runtime, enable internet, and run the cells. It detects
 the visible TPU devices and downloads the pinned dataset from Hugging Face.
 Training executes directly in the kernel. Separate cells expose weight loading,
-optimizer initialization, gradient lowering, compilation, training, validation,
+optimizer initialization, training-step lowering, compilation, training, validation,
 and export. The accelerator-free host-memory monitor prints periodic samples
 and flushes them to `OUTPUT/diagnostics/`. A kernel killed by the OS still has no
 Python traceback; the last active stage and flushed samples identify where it stopped.
@@ -239,6 +239,20 @@ admission and formatting, tokenizer pins, and encoder/head selection live in the
 example. Shared schema records, batching, weighting, evaluation, replay, artifact
 verification, and bundle I/O have task-level owners. See the
 [architecture audit and compatibility evidence](schema-components-audit.md).
+
+The September 29 phase-marked preflight reused the ahead-of-time gradient,
+normalized it, and then reached 45 GB of host RAM inside the first call to the
+separately compiled AdamW commit. The commit had no ahead-of-time compile cell.
+On CPU the commit's StableHLO is about 1.9 MB and compiles within 1.2 GiB, so
+this doesn't identify the TPU pass either.
+
+Training now compiles gradients, accumulation, and the commit as one donated
+program (`engine.step.make_jit_step`). The notebook lowers and compiles that
+exact call before training under the host-memory monitor and prints the
+executable's device memory analysis. The first update reuses the executable.
+Set `XLA_DUMP` in the settings cell to keep the compiled HLO for inspection.
+One program may need more compiler memory than either former program; its
+TPU peak remains unmeasured.
 
 The scanned encoder still received SIGKILL in the user's subsequent TPU attempt.
 The direct-kernel notebook exposes the failure stages; it does not establish
