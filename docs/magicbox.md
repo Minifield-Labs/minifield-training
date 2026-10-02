@@ -222,9 +222,10 @@ test artifact. Data parallelism replicates weights and optimizer state on
 each device. The smaller smoke batch reduces activation memory; actual TPU memory and throughput still require the hardware run.
 
 The default dataset is `protodotdesign/magicbox-v1`, revision
-`6e80c9c99a2840c1d863a7ed95e04bd31734f67e`. It contains 545,757 records across
-144 Parquet shards, including 299,052 training records. This revision adds
-judged document-extraction records and keeps 10% of the Nemotron-PII and
+`dcea9c9f19764ff657fc430a9dbd80772636df9e`. It contains 555,304 records across
+151 Parquet shards, including 308,404 training records. This revision adds
+judged document-extraction records and structured role-map records, and keeps
+10% of the Nemotron-PII and
 PubMedAbstractsNER training groups; its dataset card has details. The notebook downloads
 the processed shards, tokenizer, and metadata. `DATASET` can instead point
 to a local completed dataset.

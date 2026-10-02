@@ -40,7 +40,7 @@ FP32 and NF4 device bundles at the end (see [the MagicBox
 guide](../../docs/magicbox.md#decoding-and-export)).
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
-`6e80c9c99a2840c1d863a7ed95e04bd31734f67e`. Set `DATASET` to a completed local
+`dcea9c9f19764ff657fc430a9dbd80772636df9e`. Set `DATASET` to a completed local
 directory to use an attached dataset. Both modes train the joint pointer model
 (see [the MagicBox guide](../../docs/magicbox.md#joint-pointer-model)). With
 `SEQUENCE_TOKENS = None` and `QUESTIONS = None`, the notebook measures the
