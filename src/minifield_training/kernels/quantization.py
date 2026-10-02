@@ -100,9 +100,12 @@ def codes(weight: jax.Array, kind: str) -> tuple[jax.Array, jax.Array]:
         )
     elif kind == "nf4-g128-absmax-f16-v1":
         normalized = jnp.where(scales == 0, 0.0, grouped / scales)
-        indices = jnp.zeros(normalized.shape, dtype=jnp.int32)
-        for threshold in _NF4_TRANSITIONS:
-            indices = indices + (normalized >= threshold).astype(jnp.int32)
+        # One fused compare-and-count keeps the compiled program small.
+        indices = jnp.sum(
+            normalized[..., None] >= jnp.asarray(_NF4_TRANSITIONS, jnp.float32),
+            axis=-1,
+            dtype=jnp.int32,
+        )
     else:
         raise ValueError("Unknown quantizer")
     return (

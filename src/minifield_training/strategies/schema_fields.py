@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 import jax
+import jax.numpy as jnp
 
 from minifield_training.core import parameters as core_parameters
 from minifield_training.engine import step
@@ -61,18 +62,29 @@ def make_distilled_step(
 ) -> step.JitStep:
     """Train one set of masters as a dense parent and its quantized student.
 
-    Each microbatch runs the forward twice: on the FP32 masters, and on the
-    plan's fake-quantized effective weights. ``terms(dense, quantized,
-    batch)`` combines them; gradients from both passes reach the same
-    masters, the quantized one through the straight-through estimator.
+    Each microbatch runs the forward on the FP32 masters and on the plan's
+    fake-quantized effective weights. ``terms(dense, quantized, batch)``
+    combines them; gradients from both passes reach the same masters, the
+    quantized one through the straight-through estimator. The two passes
+    are one ``vmap`` over a stacked copy of only the quantized matrices, so
+    the compiled program holds the model once rather than twice.
     """
     quantization.validate_plan(inventory, plan)
 
     def loss_terms(
         params: types.Parameters, batch: types.DeviceBatch
     ) -> tuple[jax.Array, jax.Array]:
-        dense = forward(params, batch)
-        quantized = forward(quantization.apply(params, inventory, plan), batch)
+        effective = quantization.apply(params, inventory, plan)
+        paired = {
+            name: jnp.stack((value, effective[name]))
+            if name in plan.names
+            else value
+            for name, value in params.items()
+        }
+        axes = {name: 0 if name in plan.names else None for name in params}
+        both = jax.vmap(forward, in_axes=(axes, None))(paired, batch)
+        dense = {name: value[0] for name, value in both.items()}
+        quantized = {name: value[1] for name, value in both.items()}
         return terms(dense, quantized, batch)
 
     return step.make_jit_step(
