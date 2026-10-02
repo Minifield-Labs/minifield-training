@@ -8,32 +8,45 @@ Python directly in the notebook kernel. Weight loading, optimizer initialization
 training-step lowering, compilation, training, and evaluation have separate cells.
 Set `XLA_DUMP` to a directory to save text HLO for every compiled program.
 Host-memory samples print during compilation and persist under `diagnostics/`.
-The kernel must run Python 3.12 or 3.13; dependencies install into that kernel. Edit the notebook directly. When training source changes,
+The kernel must run Python 3.12 or 3.13; dependencies install into that kernel.
+Packages the kernel imported before the first cell, such as Kaggle's preloaded
+NumPy, keep their versions when pip accepts them, so Run All needs no restart.
+Only an incompatible preloaded version is replaced, with one restart requested. Edit the notebook directly. When training source changes,
 publish its commit and update `SOURCE_REVISION` to that full commit SHA.
 
 The notebook defaults to `RUN_MODE = 'smoke'`: 10 updates of the full pretrained
 model, checkpoint saving and full-state reload verification, 8-record validation,
 and inference export/reload. It
-detects all TPU devices on one host. A single-device runtime uses 1 request,
-1 microbatch, and schema chunks of 1. Set `DEVICES = 1` to require that topology.
+detects all TPU devices on one host. `ROWS_PER_DEVICE = 4` sets the rows each
+device takes per update. Set `DEVICES = 1` to require a single device.
 
-On the larger runtime, set `RUN_MODE = 'full'`. With 8 devices, its defaults
-are 8 requests per microbatch, 4 microbatches, and schema chunks of 4. Set
-`DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate
-output folders; full mode starts from pretrained weights. Exact optimizer
-resume requires the same device count, batch settings, and fixed-shape policy.
+On the larger runtime, set `RUN_MODE = 'full'`, which trains 1 epoch and
+prints 3 fixed validation requests' answers at every checkpoint. Set `DEVICES = 8` to require 8 visible devices. Smoke and full modes use separate output folders; full mode
+starts from pretrained weights. Exact optimizer resume requires the same device
+count, batch settings, and packing settings.
+
+With `PACK = True`, each row holds as many whole requests as fit in
+`SEQUENCE_TOKENS` tokens and `QUESTIONS_PER_ROW` questions. Every epoch gets a
+fresh seeded plan, built before training starts, so a resumed run replays the
+same updates. Updates per epoch vary with the plan; the notebook prints the
+count and how full the rows are. `PACK = False` restores 1 request per row.
+`PREFETCH = 2` prepares 2 updates ahead on a background thread, and progress
+reports include `batch_wait_seconds`.
+Final evaluation reports every source separately.
 
 By default, both modes download `protodotdesign/magicbox-v1` at revision
-`f074bb549f16ea091fd8ece12e79652b8082871f`. Set `DATASET` to a completed local
-directory to use an attached dataset. Both modes keep the dataset's full
-fixed training dimensions: 1,024 source tokens, 512 schema tokens, and 256
-schema rows per request. Records and final partial batches are padded to these
-limits; the gradient input shape stays constant. Schema rows are packed into
-`SCHEMA_SEQUENCES` encoder rows of 512 tokens per request. With the default
-`None`, the notebook measures the most any record in any split needs before
-building the shape, so the encoder runs on those tokens instead of 256 × 512. Both modes freeze the
-pretrained token embeddings while
-training the remaining 289,282,052 parameters.
+`6e80c9c99a2840c1d863a7ed95e04bd31734f67e`. Set `DATASET` to a completed local
+directory to use an attached dataset. Both modes train the joint pointer model
+(see [the MagicBox guide](../../docs/magicbox.md#joint-pointer-model)). With
+`SEQUENCE_TOKENS = None` and `QUESTIONS = None`, the notebook measures the
+longest joint question-and-text sequence and the most questions in any split
+before fixing the shape. `SCORE_WIDTH` spreads hard score labels over nearby
+levels. Both modes freeze the pretrained token embeddings. `train.py` accepts
+the same settings as `--sequence-tokens`, `--questions`, and `--score-width`,
+and `predict.py` loads v3 pointer bundles. `OPTIMIZER = 'optax'` selects the
+optax commit; `'transactional'` restores the older checked commit.
+`KEEP_CHECKPOINTS = 2` bounds output to about 2 checkpoints of 4.3 GB each
+plus the bundle, and the final cell prints the output folder's size.
 
 Local offline optimization and checkpoint check:
 
@@ -58,7 +71,7 @@ python -m examples.magicbox.train \
 ```
 
 For a bounded single-device run, use a separate output directory with
-`--devices 1 --requests 1 --microbatches 1 --row-chunk 1 --max-steps 10
+`--devices 1 --rows 4 --microbatches 1 --max-steps 10
 --validation-records 8 --final-records 8`. The CLI's `--max-steps` bounds new
 updates per invocation; the notebook caps smoke mode at 10 total updates
 across repeated invocations.
@@ -75,8 +88,12 @@ python -m examples.magicbox.predict \
   --request /data/request.json
 ```
 
-`data.py` owns the published request/target format, schema wording, and public
-response formatting. `tokenizer.py` binds the pinned native tokenizer to shared
+`train.py` owns the run composition: settings, data and shape, run identity,
+state loading, per-source final evaluation, and bundle export. The notebook and
+the CLI both call it and differ only in settings and staging. `data.py` owns
+the published request/target format, schema wording, and public response
+formatting; [format-v1.md](format-v1.md) is the pinned producer format, with its
+revision and checksum in [format-v1.json](format-v1.json). `tokenizer.py` binds the pinned native tokenizer to shared
 offset normalization. `source.py` admits the published manifest and Arrow rows,
 then supplies ordering and compilation to the shared epoch stream.
 

@@ -67,6 +67,18 @@ view never exists for all rows at once. The encoder callable takes
 `(params, ids, mask, segment_ids, positions)`; source encoding passes `None`
 for both. Fusion rows run in chunks without detaching either encoder path.
 
+`magicbox.pointer` is the current MagicBox training model. One encoder pass
+reads each request's questions, options, and source together. Every question
+answers by pointing: start and end query/key projections score every token of
+its request, and the objective masks them to the question's allowed tokens.
+There are no per-type heads, fusion blocks, dropout, or per-row loops.
+`pointer.forward` returns FP32 `[rows, questions, tokens]` start and end
+logits. A CPU test compares them with an independent NumPy computation.
+A row may pack several requests: the batch's `segment_ids` and `positions`
+reach the encoder, and each question's allowed tokens stay inside its own
+request. A CPU test checks that packed requests match separate rows in
+losses, allowed logits, and gradients.
+
 `magicbox.cache.SchemaCache` caches pre-projection schema token outputs for
 inference. Call `get` before JIT tracing, supplying tokenizer, template, and
 precision revisions in `context`. It binds packed schema inputs and immutable

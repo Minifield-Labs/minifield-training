@@ -1,6 +1,6 @@
 """Independent epoch order, partial chunks, resume, and deadline evidence."""
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 import dataclasses
 import time
 
@@ -173,3 +173,130 @@ def test_reader_cannot_silently_drop_or_repeat_records(row_count: int) -> None:
         next(source(0))
     assert not fixture.compiled
     assert not fixture.packed
+
+
+_PLANS = {
+    0: [[[0, 1], [2]], [[3]]],
+    1: [[[3, 2]], [[1], [0]], [[4]]],
+}
+
+
+def _planned(
+    plans_built: list[int], prefetch: int = 0
+) -> stream.PlannedStream[str, str]:
+    """Record indices become names; each update lists its rows and index."""
+
+    def plan(epoch: int) -> stream.EpochPlan:
+        plans_built.append(epoch)
+        return _PLANS[epoch]
+
+    def pack(
+        rows: Sequence[Sequence[str]], update: int
+    ) -> contracts.PhysicalUpdate:
+        return contracts.PhysicalUpdate(
+            {},
+            np.asarray([True]),
+            (str(update), *("+".join(row) for row in rows)),
+        )
+
+    return stream.PlannedStream(
+        epochs=2,
+        plan=plan,
+        read=lambda index: f"r{index}",
+        compile_record=str.upper,
+        pack=pack,
+        prefetch=prefetch,
+    )
+
+
+_PLANNED = [
+    ("0", "R0+R1", "R2"),
+    ("1", "R3"),
+    ("2", "R3+R2"),
+    ("3", "R1", "R0"),
+    ("4", "R4"),
+]
+
+
+@pytest.mark.parametrize("prefetch", [0, 2])
+def test_planned_stream_replays_and_resumes_by_global_update(
+    prefetch: int,
+) -> None:
+    """Updates cross epochs in plan order; resume lands on the same update."""
+    built: list[int] = []
+    planned = _planned(built, prefetch)
+    assert planned.total_updates == 5
+    updates = planned(0)
+    assert [update.example_ids for update in updates] == _PLANNED
+    resumed = planned(3)
+    assert [update.example_ids for update in resumed] == _PLANNED[3:]
+    # Each epoch's plan is built once and reused across calls.
+    assert sorted(built) == [0, 1]
+    assert not list(planned(5))
+
+
+def test_planned_stream_stops_at_the_deadline() -> None:
+    """A past deadline yields nothing; the cursor stays unread."""
+    assert not list(_planned([])(0, time.monotonic() - 1))
+    with pytest.raises(ValueError, match="Invalid update cursor"):
+        _planned([])(-1)
+
+
+def test_prefetch_keeps_order_and_reraises_on_the_consumer() -> None:
+    """Items arrive in order; a source error surfaces after earlier items."""
+
+    def source() -> Iterator[int]:
+        yield from range(3)
+        raise RuntimeError("bad record")
+
+    prefetch = stream.Prefetch(source(), 2)
+    assert [next(prefetch) for _ in range(3)] == [0, 1, 2]
+    with pytest.raises(RuntimeError, match="bad record"):
+        next(prefetch)
+    with pytest.raises(StopIteration):
+        next(prefetch)
+    prefetch.close()
+
+
+def test_prefetch_close_stops_and_closes_the_source() -> None:
+    """Closing early stops production and runs the source's cleanup."""
+    closed: list[bool] = []
+
+    def source() -> Iterator[int]:
+        try:
+            yield from range(1000)
+        finally:
+            closed.append(True)
+
+    prefetch = stream.Prefetch(source(), 1)
+    assert next(prefetch) == 0
+    prefetch.close()
+    assert closed == [True]
+    with pytest.raises(ValueError, match="depth"):
+        stream.Prefetch(iter(()), 0)
+
+
+def test_epoch_stream_prefetch_matches_inline_updates() -> None:
+    """Prefetching changes timing only, never the replayed updates."""
+
+    def epoch_stream(prefetch: int) -> stream.EpochStream[int, int]:
+        return stream.EpochStream(
+            record_count=5,
+            capacity=2,
+            epochs=2,
+            read_epoch=lambda epoch: lambda start, stop: list(
+                range(start, stop)
+            ),
+            compile_record=lambda row: row,
+            pack=lambda records, update: contracts.PhysicalUpdate(
+                {},
+                np.asarray([True]),
+                (str(update), *map(str, records)),
+            ),
+            prefetch=prefetch,
+        )
+
+    inline = [update.example_ids for update in epoch_stream(0)(1)]
+    ahead = epoch_stream(3)(1)
+    assert [update.example_ids for update in ahead] == inline
+    assert epoch_stream(0).total_updates == 6

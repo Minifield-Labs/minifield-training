@@ -91,3 +91,49 @@ def test_exact_fill_and_one_token_sequences() -> None:
         packed.positions, [[0, 1, 2, 0], [0, 1, 0, 1]]
     )
     assert packing.rows_required([3, 1, 2, 2], 4) == 2
+
+
+def test_plan_rows_first_fit_closes_full_rows() -> None:
+    """Hand-traced first-fit: rows close when tokens or questions run out."""
+    sizes = [(6, 1), (5, 1), (4, 1), (3, 1), (2, 1), (7, 1)]
+    # 6 opens row A; 5 opens B; 4 fills A (closes); 3 and 2 fill B (closes);
+    # 7 opens C, which the end of input flushes.
+    assert packing.plan_rows(sizes, (10, 3)) == [[0, 2], [1, 3, 4], [5]]
+    # With 2 question slots, a row closes after 2 items regardless of tokens.
+    assert packing.plan_rows([(1, 1)] * 3, (100, 2)) == [[0, 1], [2]]
+
+
+def test_plan_rows_bounds_open_rows() -> None:
+    """Opening a third row closes the fullest of the 2 open ones first."""
+    sizes = [(9, 1), (8, 1), (7, 1), (2, 1)]
+    assert packing.plan_rows(sizes, (10, 5), open_limit=2) == [
+        [0],
+        [1, 3],
+        [2],
+    ]
+
+
+def test_plan_rows_rejects_items_that_cant_fit_alone() -> None:
+    """An oversized item or a bad setting fails before any planning."""
+    with pytest.raises(ValueError, match="Item 1 can't fit"):
+        packing.plan_rows([(3, 1), (11, 1)], (10, 3))
+    with pytest.raises(ValueError, match="Invalid open-row limit"):
+        packing.plan_rows([(3, 1)], (10, 3), open_limit=0)
+
+
+def test_plan_updates_places_every_item_once_per_seed() -> None:
+    """Each seed gives one reproducible, complete, grouped plan."""
+    rng = np.random.default_rng(0)
+    sizes = [
+        (int(rng.integers(1, 9)), int(rng.integers(1, 3))) for _ in range(50)
+    ]
+    plan = packing.plan_updates(sizes, (16, 4), 3, seed=7)
+    assert plan == packing.plan_updates(sizes, (16, 4), 3, seed=7)
+    assert plan != packing.plan_updates(sizes, (16, 4), 3, seed=8)
+    placed = [index for update in plan for row in update for index in row]
+    assert sorted(placed) == list(range(50))
+    assert all(1 <= len(update) <= 3 for update in plan)
+    assert all(len(update) == 3 for update in plan[:-1])
+    for row in (row for update in plan for row in update):
+        assert sum(sizes[index][0] for index in row) <= 16
+        assert sum(sizes[index][1] for index in row) <= 4

@@ -91,3 +91,25 @@ def test_boolean_cursor_and_short_step_names_are_not_updates(
     manifest.write_text(json.dumps(raw), encoding="utf-8")
     _checkpoint(tmp_path, 2).rename(tmp_path / "step-2")
     assert _latest(tmp_path) is None
+
+
+def test_prune_keeps_the_newest_step_directories(tmp_path: Path) -> None:
+    """Numeric order decides; other names and symlinks are left alone."""
+    for step in (2, 10, 9, 250):
+        _checkpoint(tmp_path, step)
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "step-99999999").symlink_to(tmp_path / "notes")
+    removed = discovery.prune_checkpoints(tmp_path, 2)
+    assert sorted(path.name for path in removed) == [
+        "step-00000002",
+        "step-00000009",
+    ]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "notes",
+        "step-00000010",
+        "step-00000250",
+        "step-99999999",
+    ]
+    assert not discovery.prune_checkpoints(tmp_path / "missing", 1)
+    with pytest.raises(ValueError, match="at least one"):
+        discovery.prune_checkpoints(tmp_path, 0)

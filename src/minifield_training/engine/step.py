@@ -21,6 +21,12 @@ type LogicalStep = Callable[
     [state.State, types.DeviceBatch, jax.Array], adamw.CommitResult
 ]
 type Accumulation = tuple[jax.Array, jax.Array, types.Parameters, jax.Array]
+type Transition = Callable[
+    [state.State, types.Parameters, jax.Array, jax.Array], adamw.CommitResult
+]
+type Transaction = Callable[
+    [core_parameters.FullParameterInventory, adamw.AdamWConfig], Transition
+]
 type PhysicalGradient = Callable[
     [types.Parameters, types.DeviceBatch],
     tuple[jax.Array, jax.Array, types.Parameters],
@@ -306,6 +312,7 @@ def make_step(
     config: adamw.AdamWConfig,
     *,
     mesh: jax.sharding.Mesh | None = None,
+    transaction: Transaction = adamw.make_transaction,
 ) -> LogicalStep:
     """Build a pure logical update from unaveraged loss and target count.
 
@@ -315,9 +322,11 @@ def make_step(
     leaves are differentiated; the full FP32 tree reaches the forward call.
     The returned function is compatible with ``jax.jit``. An optional data
     mesh splits each physical batch's rows as in ``make_streaming_step``.
+    ``transaction`` builds the commit; ``optimizers.optax_adamw`` is the
+    optional optax alternative to the default transactional AdamW.
     """
     physical_gradient = _physical_gradient(loss_terms, inventory, mesh)
-    transition = adamw.make_transaction(inventory, config)
+    transition = transaction(inventory, config)
     trainable_names = inventory.trainable_names
 
     def step(
@@ -432,6 +441,7 @@ def make_jit_step(
     config: adamw.AdamWConfig,
     *,
     mesh: jax.sharding.Mesh | None = None,
+    transaction: Transaction = adamw.make_transaction,
 ) -> JitStep:
     """Compile ``make_step`` as one program that donates optimizer state.
 
@@ -440,7 +450,13 @@ def make_jit_step(
     """
     return JitStep(
         jax.jit(
-            make_step(loss_terms, inventory, config, mesh=mesh),
+            make_step(
+                loss_terms,
+                inventory,
+                config,
+                mesh=mesh,
+                transaction=transaction,
+            ),
             donate_argnums=(0,),
         ),
         jax.jit(_physical_gradient(loss_terms, inventory, mesh)),

@@ -1,6 +1,7 @@
 """CPU schema admission and private-label separation contracts."""
 
 import dataclasses
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -16,18 +17,18 @@ from examples.magicbox import data as magicbox
 from examples.magicbox import smoke
 from examples.magicbox import source
 from examples.magicbox import tokenizer
+from examples.magicbox import train
+from minifield_training.batching import pointer as pointer_batching
 from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
+from minifield_training.datasets import pointer
 from minifield_training.objectives import schema_fields as objective
 
 
 def test_consumer_contract_snapshot() -> None:
     """Pin the producer document and the consumer's versioned constants."""
-    root = (
-        Path(__file__).resolve().parents[2]
-        / "src/minifield_training/datasets/magicbox"
-    )
+    root = Path(__file__).resolve().parents[2] / "examples/magicbox"
     identity = json.loads((root / "format-v1.json").read_text())
     assert (
         identity["sha256"]
@@ -207,6 +208,8 @@ def test_corpus_measures_packed_sequences_across_splits() -> None:
             {
                 "request_json": [json.dumps(_REQUEST)] * len(targets),
                 "targets_json": targets,
+                "encoding_json": [json.dumps({"source_tokens": 7})]
+                * len(targets),
             }
         )
         for split, targets in (
@@ -219,3 +222,101 @@ def test_corpus_measures_packed_sequences_across_splits() -> None:
     assert corpus.packed_sequences(("train",), 20) == 4
     assert corpus.packed_sequences(("validation",), 20) == 1
     assert corpus.packed_sequences(("validation", "train"), 24) == 3
+    # Pointer texts: tier query 5 + options 5 + 5, mood query 5 + 3 levels of
+    # 11, plus 7 source tokens. The extract-only record has 5 + 7 + 7.
+    assert corpus.pointer_extent(("train",)) == (60, 2)
+    assert corpus.pointer_extent(("validation",)) == (19, 1)
+    assert corpus.pointer_sizes("train") == [(19, 1), (60, 2)]
+    _check_planned_stream(corpus)
+
+
+def _check_planned_stream(corpus: source.Corpus) -> None:
+    """Both train records pack into 1 row per epoch and resume exactly."""
+
+    def compile_record(raw: object) -> pointer.Record:
+        """Stand in for real compilation with a small valid choice record."""
+        targets = json_io.object_map(raw)["targets_json"]
+        return pointer.Record(
+            hashlib.sha256(str(targets).encode()).hexdigest()[:8],
+            "x",
+            fields.Encoding((1, 5), ((0, 0), (0, 1)), (True, False)),
+            (
+                pointer.Question(
+                    "q",
+                    fields.Kind.CHOICE,
+                    (1, 7),
+                    (pointer.Option("a", (1, 8)), pointer.Option("b", (1, 9))),
+                    (1.0, 0.0),
+                    True,
+                ),
+            ),
+        )
+
+    batches = pointer_batching.PointerBatchStrategy(
+        pointer_batching.Shape(1, 2, 128, 4, 128, 0), objective.balance_types
+    )
+    planned = source.planned_training_stream(
+        corpus,
+        batches,
+        corpus.pointer_sizes("train"),
+        3,
+        2,
+        compile_record,
+        prefetch=1,
+    )
+    assert planned.total_updates == 2
+    updates = list(planned(0))
+    assert [len(update.example_ids) for update in updates] == [2, 2]
+    # One packed row per update leaves the second row slot as padding.
+    assert not np.asarray(updates[0].microbatches["input_mask"])[0, 1].any()
+    assert [update.example_ids for update in planned(1)] == [
+        updates[1].example_ids
+    ]
+
+
+def _sourced_corpus(names: list[str]) -> source.Corpus:
+    """A corpus whose train and test splits carry only ids and provenance."""
+    corpus = object.__new__(source.Corpus)
+    rows = {
+        "id": [f"r{index}" for index in range(len(names))],
+        "provenance_json": [
+            json.dumps({"source": {"dataset": name}}) for name in names
+        ],
+    }
+    corpus._splits = {  # pylint: disable=protected-access
+        split: datasets.Dataset.from_dict(rows) for split in ("train", "test")
+    }
+    return corpus
+
+
+def test_corpus_reads_sources_and_samples_one_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evaluation can sample a single source's records, in its fixed order."""
+    names = ["ner", "roles", "ner", "roles", "roles"]
+    corpus = _sourced_corpus(names)
+    assert corpus.pointer_sources("test") == names
+    monkeypatch.setattr(
+        corpus, "compile_pointer", lambda raw, split: cast(object, raw["id"])
+    )
+    everything = list(corpus.pointer_records("test", 0, source="roles"))
+    assert sorted(cast(list[str], everything)) == ["r1", "r3", "r4"]
+    assert (
+        list(corpus.pointer_records("test", 2, source="roles"))
+        == everything[:2]
+    )
+
+
+def test_final_metrics_pool_sources_by_count() -> None:
+    """The pooled entry weights each source's mean by its own count."""
+    pooled = train.combine(
+        [
+            {"extract/exact": 1.0, "extract/exact/count": 30},
+            {
+                "extract/exact": 0.5,
+                "extract/exact/count": 10,
+                "choice/acc": 0.25,
+            },
+        ]
+    )
+    assert pooled == {"extract/exact": 0.875, "extract/exact/count": 40}

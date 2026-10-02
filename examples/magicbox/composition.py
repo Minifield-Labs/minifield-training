@@ -10,6 +10,7 @@ from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.lfm2_5 import model as lfm
 from minifield_training.models.magicbox import model
+from minifield_training.models.magicbox import pointer
 
 
 def inventory(
@@ -18,7 +19,25 @@ def inventory(
     """Freeze pretrained token embeddings and train the encoder and heads."""
     if cfg.hidden_size != fusion.encoder_width:
         raise ValueError("Encoder and fusion widths differ")
-    shapes = {**encoder.Adapter().expected_shapes(cfg), **model.shapes(fusion)}
+    return _build_inventory(cfg, model.shapes(fusion), freeze_embeddings)
+
+
+def pointer_inventory(
+    cfg: lfm.Config, head: pointer.Config
+) -> core_parameters.FullParameterInventory:
+    """Train the encoder and pointer projections; freeze token embeddings."""
+    if cfg.hidden_size != head.encoder_width:
+        raise ValueError("Encoder and pointer widths differ")
+    return _build_inventory(cfg, pointer.shapes(head), True)
+
+
+def _build_inventory(
+    cfg: lfm.Config,
+    head_shapes: dict[str, tuple[int, ...]],
+    freeze_embeddings: bool,
+) -> core_parameters.FullParameterInventory:
+    """Decay trainable matrices; optionally freeze the embedding table."""
+    shapes = {**encoder.Adapter().expected_shapes(cfg), **head_shapes}
     frozen = (
         frozenset({"lfm2.embed_tokens.weight"})
         if freeze_embeddings
@@ -82,5 +101,35 @@ def bind(
         params: types.Parameters, batch: types.DeviceBatch
     ) -> types.DeviceBatch:
         return forward(params, cfg, fusion, batch, training=training, bf16=bf16)
+
+    return apply
+
+
+def bind_pointer(
+    cfg: lfm.Config, head: pointer.Config, *, bf16: bool = True
+) -> Callable[[types.Parameters, types.DeviceBatch], types.DeviceBatch]:
+    """Bind the selected encoder to the joint pointer model."""
+
+    def encode(
+        params: types.Parameters,
+        ids: jax.Array,
+        mask: jax.Array,
+        segment_ids: jax.Array,
+        positions: jax.Array,
+    ) -> jax.Array:
+        return encoder.encode(
+            params,
+            cfg,
+            ids,
+            mask,
+            bf16=bf16,
+            segment_ids=segment_ids,
+            positions=positions,
+        )
+
+    def apply(
+        params: types.Parameters, batch: types.DeviceBatch
+    ) -> types.DeviceBatch:
+        return pointer.forward(params, head, encode, batch)
 
     return apply

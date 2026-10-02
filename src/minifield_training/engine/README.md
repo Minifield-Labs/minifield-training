@@ -63,7 +63,9 @@ The training runner reports the first update's wall time separately because
 it can include compilation. `warm_updates_per_second` divides later committed
 updates by their summed update-call time; it excludes batch construction,
 checkpoints, gameplay and the first update. `last_update_seconds` is the most
-recent update-call time. Pass `annotate_steps=True` to label every update with
+recent update-call time. `batch_wait_seconds` is the mean time an update
+waited for its batch in this invocation; near zero means input preparation
+keeps up with the device. Pass `annotate_steps=True` to label every update with
 its global `train` step number in a JAX trace, including resumed updates.
 The runner never starts or exports a trace. Callers choose the capture window;
 the Polyomino example restricts it to a short run and exports after the final
@@ -136,3 +138,9 @@ begin/end markers synchronize pending results at their boundaries. The runner
 also identifies state validation and batch readiness. The default callback is
 absent, so normal training has no added synchronization. A `JitStep` has no
 internal boundaries to mark; MagicBox's notebook compiles it ahead of time.
+
+`make_step`, `make_jit_step`, and `strategies.schema_fields.make_step` accept
+`transaction=` to choose the optimizer commit; the default is the
+transactional `adamw.make_transaction`. `RunConfig(...,
+keep_checkpoints=2)` deletes all but the newest checkpoints after each save
+(`None` keeps every one), so long runs stay within a bounded output size.

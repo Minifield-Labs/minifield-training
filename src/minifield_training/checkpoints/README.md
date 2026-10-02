@@ -75,3 +75,7 @@ parameters, both Adam moment trees, step, and cursor against live state exactly.
 The Polyomino verification option and MagicBox notebook preflight share this
 check. It runs at an explicit smoke boundary and needs host memory for the
 restored state; it isn't part of each optimizer update.
+
+`discovery.prune_checkpoints(root, keep)` deletes all but the `keep` newest
+`step-` directories, ordered numerically. Other names and symlinks are left
+alone. Saves are atomic, so the newest remaining checkpoint is complete.

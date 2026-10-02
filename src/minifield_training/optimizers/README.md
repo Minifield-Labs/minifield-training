@@ -27,3 +27,19 @@ rejected transactions, state validation and donated updates on CPU. CUDA
 qualification remains unrun.
 
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
+
+## Optional optax commit
+
+`optax_adamw.make_transaction(inventory, config)` is an opt-in alternative with
+the same calling convention, `CommitResult`, and `params`/`m`/`v`/`step` state
+layout. It applies `optax.clip_by_global_norm` then `optax.adamw` (decay masked
+by the inventory) to the trainable leaves, and skips the whole update when the
+loss, count, or gradients aren't finite or the step would overflow. It doesn't
+recheck incoming masters and moments or every candidate value inside the step;
+the runner validates state at startup, restore, and each checkpoint. On the
+pinned TPU compiler those in-step checks were most of the commit's compile
+memory. `update_norm` is NaN. `optax_adamw.implementation_identity(config)`
+binds checkpoints to this transaction and the optax version, so checkpoints
+never resume across the two commits. The default transactional `adamw` commit
+is unchanged. Tests compare 2 commits with an independent float64 clipped
+AdamW, check every rejection code, and run the 8-device data-parallel cases.

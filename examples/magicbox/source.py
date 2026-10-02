@@ -1,22 +1,23 @@
 """Verified Parquet intake and disk-backed, deterministic training epochs."""
 
 from collections.abc import Callable, Iterator, Sequence
-import functools
 import hashlib
 import json
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import datasets  # type: ignore[import-untyped]
 
 from examples.magicbox import data as magicbox
 from examples.magicbox import tokenizer
 from minifield_training.artifacts import files
+from minifield_training.batching import contracts
 from minifield_training.batching import packing
-from minifield_training.batching import schema_fields as batching
+from minifield_training.batching import pointer as pointer_batching
 from minifield_training.batching import stream
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
+from minifield_training.datasets import pointer
 
 
 class Corpus:
@@ -79,8 +80,10 @@ class Corpus:
             self._splits[name] = data
         return self._splits[name]
 
-    def compile(self, raw: object, split: str) -> fields.Record:
-        """Recheck token spans with the saved tokenizer."""
+    def _admitted(
+        self, raw: object, split: str
+    ) -> tuple[str, dict[str, object], dict[str, object], dict[str, object]]:
+        """Return a record's ID, labeled request, targets, and encoding."""
         value = json_io.object_map(raw)
         if (
             value.get("format") != magicbox.FORMAT
@@ -92,65 +95,144 @@ class Corpus:
         questions = json_io.object_map(request["questions"])
         if not set(targets) <= set(questions):
             raise ValueError("Unknown supervision field")
-        # Unlabeled independent rows cannot contribute a training gradient.
+        # Unlabeled questions cannot contribute a training gradient.
         # The builder may retain over-length questions after dropping labels.
         request["questions"] = {
             key: question
             for key, question in questions.items()
             if key in targets
         }
-        record = magicbox.compile_record(
-            str(value["id"]), request, targets, self.tokenizer.encode
-        )
         encoded = json_io.object_map(json.loads(str(value["encoding_json"])))
-        spans = json_io.object_map(encoded["token_spans"])
-        if len(record.source.ids) != encoded["source_tokens"]:
+        return str(value["id"]), request, targets, encoded
+
+    @staticmethod
+    def _recheck(
+        source: fields.Encoding,
+        spans: dict[str, tuple[int, int] | None],
+        encoded: dict[str, object],
+    ) -> None:
+        """Require the saved tokenizer to reproduce counts and gold spans."""
+        saved = json_io.object_map(encoded["token_spans"])
+        if len(source.ids) != encoded["source_tokens"]:
             raise ValueError("Source token count changed")
-        for field in record.fields:
-            if field.span is not None and list(field.span) != spans.get(
-                field.key
-            ):
+        for key, span in spans.items():
+            if span is not None and list(span) != saved.get(key):
                 raise ValueError("Gold token span changed")
+
+    def compile(self, raw: object, split: str) -> fields.Record:
+        """Recheck token spans with the saved tokenizer."""
+        record_id, request, targets, encoded = self._admitted(raw, split)
+        record = magicbox.compile_record(
+            record_id, request, targets, self.tokenizer.encode
+        )
+        self._recheck(
+            record.source,
+            {field.key: field.span for field in record.fields},
+            encoded,
+        )
         if not any(field.supervised for field in record.fields):
             raise ValueError("no_supervision")
         return record
 
-    def packed_sequences(
-        self, splits: Sequence[str], schema_tokens: int
-    ) -> int:
-        """Return the most packed schema rows any record in ``splits`` needs.
+    def compile_pointer(
+        self, raw: object, split: str, *, score_width: float = 0.0
+    ) -> pointer.Record:
+        """Compile the joint pointer record, rechecking saved token spans.
 
-        Row text is batch-tokenized with the saved tokenizer. Sources, spans,
-        and targets are checked later, when training compiles each record.
+        ``score_width`` spreads hard score labels over nearby levels; zero
+        keeps them one-hot. Soft labels always pass through unchanged.
         """
-        required = 0
+        record_id, request, targets, encoded = self._admitted(raw, split)
+        record = magicbox.compile_pointer_record(
+            record_id,
+            request,
+            targets,
+            self.tokenizer.encode,
+            score_width=score_width,
+        )
+        self._recheck(
+            record.source,
+            {question.key: question.span for question in record.questions},
+            encoded,
+        )
+        if not any(question.supervised for question in record.questions):
+            raise ValueError("no_supervision")
+        return record
+
+    def _token_counts(
+        self,
+        splits: Sequence[str],
+        texts: Callable[[object, object], tuple[str, ...]],
+    ) -> Iterator[tuple[int, int, list[int]]]:
+        """Yield source tokens, labeled questions, and each text's tokens.
+
+        Text is batch-tokenized with the saved tokenizer. Sources, spans, and
+        targets are checked later, when training compiles each record.
+        """
         for split in splits:
             columns = self.split(split).select_columns(
-                ["request_json", "targets_json"]
+                ["request_json", "targets_json", "encoding_json"]
             )
             for chunk in columns.iter(batch_size=1024):
+                requests = [
+                    json.loads(value) for value in chunk["request_json"]
+                ]
+                labels = [json.loads(value) for value in chunk["targets_json"]]
                 rows = [
-                    magicbox.labeled_schema_rows(
-                        json.loads(request), json.loads(targets)
-                    )
-                    for request, targets in zip(
-                        chunk["request_json"],
-                        chunk["targets_json"],
-                        strict=True,
-                    )
+                    texts(request, targets)
+                    for request, targets in zip(requests, labels, strict=True)
                 ]
                 encoded = iter(
                     self.tokenizer.tokenizer.encode_batch(
-                        [text for texts in rows for text in texts],
+                        [text for items in rows for text in items],
                         add_special_tokens=True,
                     )
                 )
-                for texts in rows:
-                    lengths = [len(next(encoded).ids) for _ in texts]
-                    required = max(
-                        required, packing.rows_required(lengths, schema_tokens)
+                for items, targets, encoding in zip(
+                    rows, labels, chunk["encoding_json"], strict=True
+                ):
+                    yield (
+                        int(json.loads(encoding)["source_tokens"]),
+                        len(targets),
+                        [len(next(encoded).ids) for _ in items],
                     )
-        return required
+
+    def packed_sequences(
+        self, splits: Sequence[str], schema_tokens: int
+    ) -> int:
+        """Return the most packed schema rows any record in ``splits`` needs."""
+        return max(
+            (
+                packing.rows_required(lengths, schema_tokens)
+                for _, _, lengths in self._token_counts(
+                    splits, magicbox.labeled_schema_rows
+                )
+            ),
+            default=0,
+        )
+
+    def pointer_sizes(self, split: str) -> list[tuple[int, int]]:
+        """Return each record's joint tokens and labeled questions, in order.
+
+        Sizes follow the split's stored row order, which planned packing
+        indexes directly.
+        """
+        return [
+            (source + sum(lengths), labeled)
+            for source, labeled, lengths in self._token_counts(
+                (split,), magicbox.labeled_pointer_texts
+            )
+        ]
+
+    def pointer_extent(self, splits: Sequence[str]) -> tuple[int, int]:
+        """Return the longest joint sequence and most questions per record."""
+        tokens, questions = 0, 0
+        for source, labeled, lengths in self._token_counts(
+            splits, magicbox.labeled_pointer_texts
+        ):
+            tokens = max(tokens, source + sum(lengths))
+            questions = max(questions, labeled)
+        return tokens, questions
 
     def records(self, split: str, limit: int) -> Iterator[fields.Record]:
         """Apply the experiment's fixed held-out sampling policy."""
@@ -159,14 +241,63 @@ class Corpus:
         for index in range(count):
             yield self.compile(dataset[index], split)
 
+    def pointer_sources(self, split: str) -> list[str]:
+        """Return each record's source dataset, in stored order."""
+        names: list[str] = []
+        columns = self.split(split).select_columns(["provenance_json"])
+        for chunk in columns.iter(batch_size=4096):
+            names.extend(
+                source_name(value) for value in chunk["provenance_json"]
+            )
+        return names
 
-def training_stream(
+    def pointer_records(
+        self, split: str, limit: int, source: str | None = None
+    ) -> Iterator[pointer.Record]:
+        """Sample held-out pointer records with their original labels.
+
+        With ``source``, sample only that source dataset's records.
+        """
+        dataset = self.split(split).shuffle(seed=1729, keep_in_memory=False)
+        if source is not None:
+            dataset = dataset.filter(
+                lambda value: source_name(value) == source,
+                input_columns="provenance_json",
+                keep_in_memory=False,
+            )
+        for index in range(min(limit, len(dataset)) if limit else len(dataset)):
+            yield self.compile_pointer(dataset[index], split)
+
+
+def source_name(provenance_json: str) -> str:
+    """The upstream dataset a record came from, from its provenance."""
+    provenance = json_io.object_map(json.loads(provenance_json))
+    return str(json_io.object_map(provenance["source"])["dataset"])
+
+
+class Packer[RecordT](Protocol):
+    """A batch strategy that packs compiled records into one update."""
+
+    @property
+    def shape(self) -> contracts.CapacityShape:
+        """Logical request capacity."""
+
+    def pack(
+        self, examples: Sequence[RecordT], *, seed: int, update: int
+    ) -> contracts.PhysicalUpdate:
+        """Pack one logical update."""
+
+
+def training_stream[RecordT](
     corpus: Corpus,
-    batches: batching.SchemaBatchStrategy,
+    batches: Packer[RecordT],
     seed: int,
     epochs: int,
-) -> stream.EpochStream[object, fields.Record]:
-    """Bind the published Arrow order and adapter to shared cursor replay."""
+    compile_record: Callable[[object], RecordT],
+    *,
+    prefetch: int = 0,
+) -> stream.EpochStream[object, RecordT]:
+    """Bind the published Arrow order and a record compiler to cursor replay."""
     data = corpus.split("train")
 
     def read_epoch(epoch: int) -> Callable[[int, int], Sequence[object]]:
@@ -180,8 +311,49 @@ def training_stream(
         capacity=batches.shape.capacity,
         epochs=epochs,
         read_epoch=read_epoch,
-        compile_record=functools.partial(corpus.compile, split="train"),
+        compile_record=compile_record,
         pack=lambda records, update: batches.pack(
             records, seed=seed, update=update
         ),
+        prefetch=prefetch,
+    )
+
+
+def planned_training_stream(
+    corpus: Corpus,
+    batches: pointer_batching.PointerBatchStrategy,
+    sizes: Sequence[tuple[int, int]],
+    seed: int,
+    epochs: int,
+    compile_record: Callable[[object], pointer.Record],
+    *,
+    prefetch: int = 2,
+    open_limit: int = 64,
+    close_below: float = 0.05,
+) -> stream.PlannedStream[object, pointer.Record]:
+    """Pack whole training requests into each update's fixed rows.
+
+    Each epoch shuffles by ``seed + epoch`` and packs requests by online
+    first-fit within the row's token and question capacity, so the plan and
+    the resume cursor are deterministic. ``sizes`` come from
+    ``Corpus.pointer_sizes("train")``.
+    """
+    data = corpus.split("train")
+    if len(sizes) != len(data):
+        raise ValueError("Packing sizes don't match the training split")
+    shape = batches.shape
+    return stream.PlannedStream(
+        epochs=epochs,
+        plan=lambda epoch: packing.plan_updates(
+            sizes,
+            (shape.sequence_tokens, shape.questions),
+            shape.capacity,
+            seed=seed + epoch,
+            open_limit=open_limit,
+            close_below=close_below,
+        ),
+        read=lambda index: data[index],
+        compile_record=compile_record,
+        pack=batches.pack_rows,
+        prefetch=prefetch,
     )

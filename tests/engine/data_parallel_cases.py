@@ -17,6 +17,7 @@ from minifield_training.engine import training_run
 from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import model
 from minifield_training.optimizers import adamw
+from minifield_training.optimizers import optax_adamw
 from minifield_training.optimizers import state
 from minifield_training.strategies import classification
 
@@ -81,6 +82,14 @@ def _update(
     optimizer = adamw.AdamWConfig(0.1, **options)
     if engine == "jit":
         return step.make_jit_step(_terms, inventory, optimizer, mesh=_mesh())
+    if engine == "optax":
+        return step.make_jit_step(
+            _terms,
+            inventory,
+            optimizer,
+            mesh=_mesh(),
+            transaction=optax_adamw.make_transaction,
+        )
     return step.make_streaming_step(
         _terms,
         inventory,
@@ -90,7 +99,7 @@ def _update(
     )
 
 
-@pytest.mark.parametrize("engine", ["streaming", "fused", "jit"])
+@pytest.mark.parametrize("engine", ["streaming", "fused", "jit", "optax"])
 def test_global_weighting_and_replicated_state(engine: str) -> None:
     """Independent affine-model math checks reduction and one Adam commit."""
     inventory, initial = _setup()
@@ -120,7 +129,7 @@ def test_global_weighting_and_replicated_state(engine: str) -> None:
             np.testing.assert_array_equal(shard.data, leaf)
 
 
-@pytest.mark.parametrize("engine", ["streaming", "jit"])
+@pytest.mark.parametrize("engine", ["streaming", "jit", "optax"])
 @pytest.mark.parametrize("failure", ["negative", "nan", "loss", "empty"])
 def test_bad_replica_rejects_entire_update(failure: str, engine: str) -> None:
     """One invalid shard cannot hide behind another shard's positive count."""
@@ -162,14 +171,14 @@ def test_shape_and_device_admission() -> None:
             adamw.AdamWConfig(0.1),
             mesh=jax.sharding.Mesh(np.asarray(jax.devices()), ("wrong",)),
         )
-    for engine in ("streaming", "jit"):
+    for engine in ("streaming", "jit", "optax"):
         with pytest.raises(ValueError, match="divisible"):
             _update(engine, inventory)(
                 initial, {"x": jnp.ones((1, 3))}, np.array([True])
             )
 
 
-@pytest.mark.parametrize("engine", ["streaming", "jit"])
+@pytest.mark.parametrize("engine", ["streaming", "jit", "optax"])
 def test_runner_checkpoint_resume(tmp_path: Path, engine: str) -> None:
     """Restored replicated training equals uninterrupted next-update state."""
     inventory, initial = _setup()

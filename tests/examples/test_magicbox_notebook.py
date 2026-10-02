@@ -76,7 +76,7 @@ def test_direct_hardware_probe(
     )
     if valid:
         _execute(_cells()[3], namespace)
-        assert namespace["REQUESTS"] == count
+        assert namespace["ROWS"] == count * namespace["ROWS_PER_DEVICE"]
         assert namespace["DEVICES"] == count
     else:
         with pytest.raises(RuntimeError):
@@ -103,12 +103,14 @@ def test_direct_training_resume_bounds(tmp_path: Path, mode: str) -> None:
         OUTPUT=tmp_path,
         current={},
         update=object(),
-        dataclasses=SimpleNamespace(replace=lambda value, **_kwargs: value),
-        inventory=object(),
-        stream=SimpleNamespace(updates_per_epoch=100),
+        run=SimpleNamespace(
+            inventory=object(),
+            stream=SimpleNamespace(total_updates=300),
+            optimizer_id="test",
+            corpus=SimpleNamespace(pointer_records=lambda *_args: iter(())),
+        ),
         cursor=SimpleNamespace(next_batch=0),
         checkpoints=tmp_path,
-        optimizer=SimpleNamespace(implementation_identity="test"),
         evaluator=SimpleNamespace(callback=lambda *_args: None),
         diagnostics=SimpleNamespace(
             monitor=lambda *_args: contextlib.nullcontext()
@@ -164,6 +166,55 @@ def test_compile_is_a_separate_direct_stage(tmp_path: Path) -> None:
     _execute(_cells()[11], namespace)
     assert calls == ["lower", "compile"]
     assert namespace["compiled_step"] is executable
+
+
+@pytest.mark.parametrize("compatible", [True, False])
+def test_install_keeps_packages_the_kernel_already_imported(
+    tmp_path: Path, compatible: bool
+) -> None:
+    """A preloaded numpy is kept; only an incompatible one needs a restart."""
+    import numpy  # pylint: disable=import-outside-toplevel
+
+    calls: list[list[str]] = []
+
+    def check_call(command: list[str]) -> None:
+        calls.append(command)
+        if "--output-file" in command:
+            Path(command[command.index("--output-file") + 1]).write_text(
+                "numpy==2.2.6\n    # via jax\n"
+                "scipy==1.16.0 ; python_version >= '3.12'\n",
+                encoding="utf-8",
+            )
+
+    def run(command: list[str]) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=0 if compatible else 1)
+
+    kernel = SimpleNamespace(
+        version_info=(3, 12, 0),
+        modules={"numpy": SimpleNamespace(__version__=numpy.__version__)},
+        executable="python",
+        path=[],
+    )
+    namespace: dict[str, Any] = dict(
+        sys=kernel,
+        subprocess=SimpleNamespace(check_call=check_call, run=run),
+        SCRATCH=tmp_path,
+        CHECKOUT=tmp_path / "checkout",
+    )
+    if not compatible:
+        with pytest.raises(RuntimeError, match="Restart the session"):
+            _execute(_cells()[2], namespace)
+        assert str(tmp_path / "notebook-requirements.txt") in calls[-1]
+        return
+    _execute(_cells()[2], namespace)
+    kept = (tmp_path / "notebook-requirements-kept.txt").read_text()
+    assert "numpy" not in kept and "scipy==1.16.0" in kept
+    assert (tmp_path / "notebook-preloaded.txt").read_text() == (
+        f"numpy=={numpy.__version__}\n"
+    )
+    assert "-c" in calls[-1]
+    assert kernel.path == [str(tmp_path / "checkout")]
 
 
 def test_no_training_subprocess() -> None:

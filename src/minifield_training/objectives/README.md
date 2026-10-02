@@ -30,3 +30,9 @@ field's loss weight. Tests use analytical zero-logit expectations.
 weighted mean across tasks. The caller passes it into the batch strategy so its
 host weights cover the whole logical update before device/microbatch slicing.
 There are no model-family or product-template imports in these objectives.
+
+`pointer.losses` is one masked soft-target cross-entropy for every question
+type: a softmax over each question's allowed tokens, averaged over the start
+and end pointers. Padding questions have zero targets and zero loss.
+`pointer.terms` returns the type-weighted sum and weight mass. Tests check
+hand-derived losses and gradients, including masked and padding positions.
