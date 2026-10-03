@@ -7,6 +7,7 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 from examples.magicbox import smoke
@@ -220,3 +221,72 @@ def test_scanned_layers_match_unrolled_outputs_and_gradients(
     assert all(value.dtype == jnp.float32 for value in actual_grad.values())
     # JAX 0.7.2 omits a type declaration for cache cleanup.
     jax.clear_caches()  # type: ignore[no-untyped-call]
+
+
+def test_local_layers_follow_the_modernbert_layout() -> None:
+    """The first of every 3 attention layers stays global; convs don't count."""
+    published = (
+        "conv",
+        "conv",
+        "full_attention",
+        "conv",
+        "full_attention",
+        "full_attention",
+        "conv",
+        "full_attention",
+        "full_attention",
+    )
+    local = encoder.Attention(local_window=4).layer_kinds(published)
+    assert local == (
+        "conv",
+        "conv",
+        "full_attention",
+        "conv",
+        "local_attention",
+        "local_attention",
+        "conv",
+        "full_attention",
+        "local_attention",
+    )
+    assert encoder.Attention().layer_kinds(published) == published
+
+
+def test_local_attention_sees_only_nearby_tokens() -> None:
+    """A window covering the row matches global; a narrow one stops reach."""
+    cfg = model.Config(16, 32, 2, 1, 128, ("full_attention", "full_attention"))
+    params = {
+        name: jnp.ones(shape, jnp.float32)
+        if len(shape) == 1
+        else jax.random.normal(jax.random.PRNGKey(index), shape) * 0.08
+        for index, (name, shape) in enumerate(
+            encoder.Adapter().expected_shapes(cfg).items()
+        )
+    }
+    ids = jnp.asarray([[1, 5, 6, 7, 9, 4, 3, 2]])
+    mask = jnp.ones_like(ids)
+
+    def run(window: int | None) -> npt.NDArray[np.float32]:
+        options = encoder.Attention(local_window=window, global_every=2)
+        return np.asarray(
+            encoder.encode(
+                params, cfg, ids, mask, bf16=False, attention_options=options
+            )
+        )
+
+    whole = run(None)
+    np.testing.assert_allclose(run(16), whole, rtol=1e-6, atol=1e-6)
+    narrow = run(2)
+    assert not np.allclose(narrow, whole, atol=1e-4)
+    # The first attention layer stays global, so the last token still
+    # reaches the first even though the second layer is local.
+    changed = np.asarray(
+        encoder.encode(
+            params,
+            cfg,
+            ids.at[0, 7].set(8),
+            mask,
+            bf16=False,
+            attention_options=encoder.Attention(local_window=2, global_every=2),
+        )
+    )
+    assert not np.allclose(changed[:, 0], narrow[:, 0])

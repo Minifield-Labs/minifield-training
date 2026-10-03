@@ -25,6 +25,7 @@ def save(
     assets: Mapping[str, Path],
     source_model: str,
     source_revision: str,
+    output: inference_output.OutputStrategy | None = None,
 ) -> None:
     """Publish weights, assets, and canonical ``config.json`` together.
 
@@ -49,7 +50,7 @@ def save(
     ) as temporary:
         staged = Path(temporary) / "bundle"
         staged.mkdir()
-        inference_output.DenseEffectiveOutput().write(
+        (output or inference_output.DenseEffectiveOutput()).write(
             staged / "model.safetensors",
             parameters,
             inventory,
@@ -120,6 +121,7 @@ def load(
     inventory: Callable[
         [dict[str, object]], core_parameters.FullParameterInventory
     ],
+    packed: bool = False,
 ) -> tuple[dict[str, object], types.Parameters]:
     """Inspect once, admit caller metadata, then restore exact dense tensors.
 
@@ -136,6 +138,12 @@ def load(
         raise ValueError("Bundle is missing model.safetensors")
     weight_sha256 = checksums["model.safetensors"]
     expected_inventory = inventory(metadata)
+    if packed:
+        return metadata, inference_output.load_packed(
+            directory / "model.safetensors",
+            expected_inventory,
+            sha256=weight_sha256,
+        )
     parameters = tensors.load_masters(
         directory / "model.safetensors",
         {spec.name: spec.shape for spec in expected_inventory.specs},

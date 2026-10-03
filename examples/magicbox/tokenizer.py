@@ -22,22 +22,26 @@ class Adapter:
         self.contract = json_io.object_map(
             json.loads((directory / "contract.json").read_text())
         )
+        # A device bundle's tokenizer is trimmed from the dataset's pinned one
+        # (examples.magicbox.export) and declares its own bytes.
+        trimmed = self.contract.get("trimmed_from") == TOKENIZER_SHA256
         expected = {
             "model": encoder.SOURCE.model_id,
             "revision": encoder.SOURCE.revision,
             "original_sha256": encoder.SOURCE.tokenizer_sha256,
-            "sha256": TOKENIZER_SHA256,
             "offset_policy": magicbox.OFFSET_POLICY,
             "template": magicbox.TEMPLATE,
             "padding_side": "right",
             "readout_token_id": 1,
         }
+        if not trimmed:
+            expected["sha256"] = TOKENIZER_SHA256
         if any(
             self.contract.get(key) != value for key, value in expected.items()
         ):
             raise ValueError("Dataset tokenizer contract mismatch")
         path = directory / "tokenizer.json"
-        if json_io.digest_file(path) != TOKENIZER_SHA256:
+        if json_io.digest_file(path) != self.contract.get("sha256"):
             raise ValueError("Dataset tokenizer bytes changed")
         self.tokenizer = Tokenizer.from_file(str(path))
         self.tokenizer.no_padding()

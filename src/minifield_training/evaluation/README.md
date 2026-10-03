@@ -31,3 +31,19 @@ generic `Evaluator` (pass `metrics=pointer.Metrics`), which accepts any scorer
 and recorder for its record type. `SingleRequest` shares single-request jitted
 execution between both predictors. Tests decode hand-built logits for every
 type and check each metric.
+
+Beyond those means, `pointer.Metrics` reports:
+
+| Type | Metrics |
+| --- | --- |
+| Choice | `nll` of the gold option, 10-bin `ece` on top-1 confidence, top-2 `margin` |
+| Binary | `auroc` (gold ≥ 0.5 is positive), soft-label `nll`, 10-bin `ece` |
+| Ordinal | `spearman` between predicted and gold expected levels, `within_1` (rounded prediction within 1 of the gold level) |
+| Extraction | lowercase whitespace `token_f1` (two nulls score 1), character `span_iou` on answerable questions, `null_f1` with "not stated" as positive |
+
+`<type>/error_reduction` is `1 - error / baseline` against a trivial answer:
+always null (exact-or-null error), a uniform guess (choice error), 0.5
+(Brier), or the middle level (MAE). `error_reduction` weights the types
+equally. `pointer.degradation(in_domain, shifted)` gives each shared metric's
+relative change, signed so positive is worse. AUROC, Spearman and ECE need at
+least 2 questions; tests check each against hand-derived values.

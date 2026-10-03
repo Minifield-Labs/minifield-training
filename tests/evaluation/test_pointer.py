@@ -1,5 +1,6 @@
 """Hand-built pointer logits decode into every typed answer."""
 
+import dataclasses
 import math
 
 import pytest
@@ -115,3 +116,80 @@ def test_metrics_compare_against_supervised_targets() -> None:
     assert means["binary/brier"] == pytest.approx((0.75 - 0.8) ** 2)
     assert means["ordinal/mae"] == pytest.approx(0, abs=1e-6)
     assert means["loss"] == pytest.approx(2.5)
+
+
+def test_added_metrics_match_hand_derived_values() -> None:
+    """Calibration, F1, IoU, and error reduction for the fixture answers."""
+    record = _record()
+    placed, start, end = _logits(record)
+    metrics = evaluation.Metrics(("extract", "choice", "binary", "ordinal"))
+    metrics.record(
+        record,
+        evaluation.decode(record, placed, start, end),
+        [1.0, 2.0, 3.0, 4.0],
+    )
+    means = metrics.means()
+    chosen = math.exp(5) / (1 + math.exp(5))
+    assert means["extract/token_f1"] == 1
+    assert means["extract/span_iou"] == 1
+    assert means["choice/nll"] == pytest.approx(-math.log(chosen))
+    assert means["choice/margin"] == pytest.approx(2 * chosen - 1)
+    assert means["choice/ece"] == pytest.approx(1 - chosen)
+    assert means["binary/nll"] == pytest.approx(
+        -(0.8 * math.log(0.75) + 0.2 * math.log(0.25))
+    )
+    assert means["ordinal/within_1"] == 1
+    # One question per type: rank metrics and null F1 have nothing to rank.
+    assert "ordinal/spearman" not in means and "binary/auroc" not in means
+    assert "extract/null_f1" not in means
+    binary = 1 - (0.75 - 0.8) ** 2 / (0.5 - 0.8) ** 2
+    assert means["binary/error_reduction"] == pytest.approx(binary)
+    assert means["error_reduction"] == pytest.approx((3 + binary) / 4, abs=1e-6)
+
+
+def test_rank_and_calibration_statistics() -> None:
+    """Small cases with known AUROC, Spearman, ECE, F1, and degradation."""
+    assert evaluation.auroc(
+        [0.9, 0.8, 0.3, 0.8], [True, False, False, True]
+    ) == (pytest.approx(0.875))
+    assert evaluation.auroc([0.5, 0.6], [True, True]) is None
+    assert evaluation.spearman([1, 2, 3, 4], [10, 20, 30, 40]) == 1
+    assert evaluation.spearman([1, 2, 3], [3, 2, 1]) == pytest.approx(-1)
+    # Bins 0.9 (outcomes 1, 0) and 0.2 (outcome 0): |1.8 - 1| + |0.2 - 0|.
+    assert evaluation.expected_calibration_error(
+        [0.9, 0.9, 0.2], [1.0, 0.0, 0.0]
+    ) == pytest.approx(1.0 / 3)
+    assert evaluation.token_f1("Ada Lee", "ada") == pytest.approx(2 / 3)
+    assert evaluation.token_f1(None, None) == 1
+    assert evaluation.token_f1("Ada", None) == 0
+    shift = evaluation.degradation(
+        {
+            "choice/accuracy": 0.8,
+            "binary/brier": 0.1,
+            "choice/accuracy/count": 9,
+        },
+        {"choice/accuracy": 0.6, "binary/brier": 0.15},
+    )
+    assert shift == pytest.approx(
+        {"choice/accuracy": 0.25, "binary/brier": 0.5}
+    )
+
+
+def test_null_f1_treats_not_stated_as_the_positive_class() -> None:
+    """2 correct nulls, 1 missed null, 1 wrong null: F1 = 4 / 6."""
+    record = _record()
+    placed, start, end = _logits(record)
+    metrics = evaluation.Metrics(("extract", "choice", "binary", "ordinal"))
+    null_gold = dataclasses.replace(record.questions[0], span=None)
+    cases = [(null_gold, 1.0), (null_gold, 1.0), (null_gold, 0.0)]
+    cases.append((record.questions[0], 1.0))
+    for question, threshold in cases:
+        single = dataclasses.replace(record, questions=(question,))
+        metrics.record(
+            single,
+            evaluation.decode(
+                single, placed, start, end, presence_threshold=threshold
+            ),
+            [0.0],
+        )
+    assert metrics.means()["extract/null_f1"] == pytest.approx(4 / 6)

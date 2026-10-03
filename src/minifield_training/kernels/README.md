@@ -11,6 +11,10 @@ qualification and performance evidence are still pending.
 The executable dependency policy is [architecture.toml](../../../architecture.toml).
 Document each added public contract, consumer, example, and test here.
 
+`quantization.codes` returns a matrix's U8 codebook indices and F16 group
+scales, and `quantization.decode` turns them back into FP32; the fake
+quantizer is exactly `decode(codes(w))`. Codes use the runtime's
+`minifield.nf4.v1` and `minifield.ternary.v1` meanings.
 `quantization.Group128Quantizer` implements ternary and NF4 fake quantization
 for FP32 rank-2 matrices whose reduction width divides 128. Each group uses
 its FP32 absmax converted to FP16 and back before decoding. Ternary uses
@@ -147,3 +151,13 @@ zero. Analytical tests cover segment-local averages, boundary taps, and their
 gradients. Analytical CPU tests cover integer/boolean masks, exact
 convolution boundaries, and input gradients. TPU qualification runs in the
 MagicBox notebook's full-model startup cell.
+
+`bidirectional.attention(..., window=W)` limits each query to keys at most
+`W // 2` positions away; segments still bound it. `backend="splash"` runs
+`attention.splash_bidirectional_attention`, a noncausal Splash kernel with
+segment IDs and a static full or local mask, so the score matrix is never
+materialized and distant blocks are skipped. Unpacked dense rows leave padded
+query outputs unspecified, since nothing reads them; Splash zeroes them. CPU
+tests compare Splash in interpret mode with the dense path on active tokens,
+packed and padded, global and local, with grouped KV heads. TPU speed and
+memory are unmeasured.

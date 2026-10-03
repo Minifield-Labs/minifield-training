@@ -20,10 +20,12 @@ from minifield_training.core import json_io
 from minifield_training.datasets import pointer
 from minifield_training.evaluation import pointer as evaluation
 from minifield_training.models.lfm2_5 import encoder
+from minifield_training.models.lfm2_5 import model as lfm
 from minifield_training.models.magicbox import pointer as model
 from minifield_training.objectives import pointer as objective
 from minifield_training.objectives import schema_fields as weighting
 from minifield_training.optimizers import adamw
+from minifield_training.strategies import quantization
 from minifield_training.strategies import schema_fields as strategy
 
 _REQUEST = {
@@ -305,3 +307,61 @@ def _device(update: contracts.PhysicalUpdate) -> dict[str, jax.Array]:
     return {
         key: jnp.asarray(value[0]) for key, value in update.microbatches.items()
     }
+
+
+def _qat_encoder() -> tuple[lfm.Config, dict[str, jax.Array]]:
+    """A tiny encoder whose projections fit the group-128 quantizer."""
+    cfg = lfm.Config(128, 128, 2, 1, 128, ("conv", "full_attention"))
+    params = {
+        name: jnp.ones(shape, jnp.float32)
+        if len(shape) == 1
+        else jax.random.normal(jax.random.PRNGKey(index), shape) * 0.05
+        for index, (name, shape) in enumerate(
+            encoder.Adapter().expected_shapes(cfg).items()
+        )
+    }
+    return cfg, params
+
+
+def test_shared_weights_train_dense_and_nf4_answers_together() -> None:
+    """One set of masters lowers both the dense and the NF4 pointer loss."""
+    cfg, params = _qat_encoder()
+    head = model.Config(encoder_width=cfg.hidden_size, pointer_width=8)
+    params.update(model.initialize(head, jax.random.PRNGKey(3)))
+    plan = magicbox.quantization_plan(cfg, "nf4")
+    inventory = magicbox.pointer_inventory(cfg, head, plan)
+    assert {spec.name for spec in inventory.specs if spec.quantized} == (
+        magicbox.encoder_projections(cfg)
+    )
+    record = _record()
+    batches = batching.PointerBatchStrategy(
+        batching.Shape(1, 1, record.sequence_tokens + 3, 8, 128, 0),
+        weighting.balance_types,
+    )
+    packed = batches.pack([record], seed=0, update=0)
+    forward = magicbox.bind_pointer(cfg, head, bf16=False)
+    update = strategy.make_distilled_step(
+        forward,
+        inventory,
+        adamw.AdamWConfig(learning_rate=0.003, weight_decay=0),
+        plan,
+        objective.distilled_terms,
+    )
+    batch = {key: value[0] for key, value in packed.microbatches.items()}
+
+    def losses(masters: dict[str, jax.Array]) -> tuple[float, float]:
+        quantized = quantization.apply(masters, inventory, plan)
+        return tuple(  # type: ignore[return-value]
+            float(objective.terms(forward(weights, batch), batch)[0])
+            for weights in (masters, quantized)
+        )
+
+    before = losses(params)
+    current = adamw.initialize_state(params, inventory)
+    for _ in range(40):
+        result = update(current, packed.microbatches, packed.active)
+        assert bool(result.committed)
+        current = result.state
+    dense, nf4 = losses(current["params"])
+    assert dense < before[0] * 0.5
+    assert nf4 < before[1] * 0.5

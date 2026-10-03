@@ -3,6 +3,10 @@
 import jax
 import jax.numpy as jnp
 
+from minifield_training.kernels import attention as causal
+
+BACKENDS = ("dense", "splash")
+
 
 def attention(
     query: jax.Array,
@@ -10,6 +14,9 @@ def attention(
     value: jax.Array,
     mask: jax.Array,
     segment_ids: jax.Array | None = None,
+    *,
+    window: int | None = None,
+    backend: str = "dense",
 ) -> jax.Array:
     """Attend in both directions with GQA and zero fully masked rows.
 
@@ -17,20 +24,45 @@ def attention(
     FP32. A finite sentinel and explicit zero handle empty padded examples.
     With packed ``segment_ids`` (BT, 0 for padding), a query sees only active
     keys in its own nonzero segment, and inactive queries return zeros.
+    ``window`` makes attention local: a query sees keys at most
+    ``window // 2`` positions away. ``backend="splash"`` runs the same
+    attention as a TPU Splash kernel without materializing the score matrix.
     """
+    if window is not None and (window < 2 or window % 2):
+        raise ValueError("Local attention window must be a positive even width")
+    if backend == "splash":
+        return causal.splash_bidirectional_attention(
+            query, key, value, mask, segment_ids, window=window
+        )
+    if backend != "dense":
+        raise ValueError(f"Unknown attention backend: {backend}")
     if segment_ids is None:
-        valid = mask[:, None, None, :].astype(jnp.bool_)
-        present = jnp.any(mask, axis=-1)[:, None, None, None]
+        # Key-only mask: queries may differ in length (cross-attention).
+        active = mask.astype(jnp.bool_)
+        valid = active[:, None, :]
+        present = jnp.any(active, axis=-1)[:, None, None, None]
     else:
         active = mask.astype(jnp.bool_) & (segment_ids != 0)
         valid = (
             (segment_ids[:, :, None] == segment_ids[:, None, :])
             & active[:, :, None]
             & active[:, None, :]
-        )[:, None]
+        )
         present = active[:, :, None, None]
+    if window is not None:
+        queries = jnp.arange(query.shape[1])[:, None]
+        near = (
+            jnp.abs(queries - jnp.arange(key.shape[1])[None, :]) <= window // 2
+        )
+        valid = valid & near
+        present = present & jnp.any(valid, axis=-1)[..., None, None]
     result = jax.nn.dot_product_attention(
-        query, key, value, mask=valid, is_causal=False, implementation="xla"
+        query,
+        key,
+        value,
+        mask=valid[:, None],
+        is_causal=False,
+        implementation="xla",
     )
     return jnp.where(present, result, 0)
 

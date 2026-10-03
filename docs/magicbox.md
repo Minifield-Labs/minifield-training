@@ -167,26 +167,46 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
 - All visible TPU devices, 4 packed rows per device, 1 microbatch. On 8
   devices this is 32 rows, about 115 requests, per logical update.
 - BF16 activations, FP32 losses, parameters, and optimizer state.
-- AdamW: learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
-  weight decay 0.01 for matrices, gradient clipping 1.0.
+- AdamW: peak learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
+  weight decay 0.01 for matrices, gradient clipping 1.0. The rate warms up
+  linearly over 500 updates (`WARMUP_UPDATES`), then decays by cosine to 50%
+  (`FINAL_LR_FRACTION`) at the last update.
+- Splash attention in the encoder (`ATTENTION = 'splash'`; `'dense'` is the
+  XLA reference). `LOCAL_WINDOW` (off by default) makes all but every
+  `GLOBAL_EVERY`-th attention layer local, as in ModernBERT.
+- NF4 quantization-aware training on shared weights (`QUANTIZER = 'nf4'`):
+  every update runs the dense model and an NF4 student made from the same
+  masters. The loss adds the student's cross-entropy and its distillation
+  from the dense answers (`DISTILL_WEIGHT`, `TEMPERATURE`). Encoder
+  projections are quantized; embeddings, norms and pointer heads aren't.
+  Each update runs the model twice, so expect roughly double the step time.
 - Gradient checkpointing for encoder blocks.
 - A fixed row length from the dataset's longest joint sequence and 32
   question slots per row; shorter rows are padded.
 - Checkpoint every 250 updates; keep 2 complete states after evaluation.
 - 256 seeded validation records at each checkpoint, plus gold and predicted
   answers for 3 fixed validation requests (`SAMPLE_RECORDS`) in the progress
-  log. After all epochs, save the bundle, then evaluate up to 2,000 records
-  from each source in each of validation, calibration, test, and OOD
+  log. After all epochs, save the bundle, then evaluate up to 1,000 records
+  per question type from each source in each of validation, calibration,
+  test, and OOD
   (`FINAL_RECORDS = 0` evaluates all). `final-<split>.json` holds each
-  source's metrics and an `all` entry pooled by count.
+  source's metrics and an `all` entry pooled by count; the NF4 student's are
+  in `final-<split>-nf4.json`. Device bundles are exported last.
 - Each session runs up to 8 hours. Rerunning resumes the next unread update.
+- `COPY_TO` copies the bundles, results and logs (not checkpoints) to a
+  folder such as Google Drive at the end, since Colab wipes `/content`.
 
-The recipe uses a constant learning rate. There is no warmup, scheduler,
-quantization or automatic best-checkpoint selection. Token embeddings remain
-frozen throughout the run.
+There is no automatic best-checkpoint selection. Token embeddings remain
+frozen throughout the run. Splash attention, local layers and the NF4 student
+have CPU equivalence and learning tests; their TPU speed, memory and accuracy
+need the hardware run. Settings that are off leave the run identity unchanged.
 Validation reports contain per-type loss and field counts, extraction exact
 match/false-positive/false-null rates, choice accuracy, binary Brier score,
-and ordinal MAE. Exact extraction compares the dataset's canonical gold span.
+and ordinal MAE, plus the calibration, ranking, F1, IoU and equal-type
+error-reduction metrics listed in [the evaluation
+README](../src/minifield_training/evaluation/README.md). Final evaluation also
+writes `final-ood-degradation.json`: each pooled metric's relative change from
+test to OOD, positive when worse. Exact extraction compares the dataset's canonical gold span.
 Alternative acceptable spans in provenance aren't included in that metric.
 
 Losses first average selectable token BCE within each extraction field, then
@@ -209,9 +229,10 @@ test artifact. Data parallelism replicates weights and optimizer state on
 each device. The smaller smoke batch reduces activation memory; actual TPU memory and throughput still require the hardware run.
 
 The default dataset is `protodotdesign/magicbox-v1`, revision
-`6e80c9c99a2840c1d863a7ed95e04bd31734f67e`. It contains 545,757 records across
-144 Parquet shards, including 299,052 training records. This revision adds
-judged document-extraction records and keeps 10% of the Nemotron-PII and
+`30ecfbea3f4bc744687c3f6c1dd5bbc4a0736007`. It contains 447,422 records across
+151 Parquet shards, including 308,404 training records. This revision adds
+judged document-extraction records and structured role-map records, keeps 5%
+of the Nemotron-PII test groups, and keeps 10% of the Nemotron-PII and
 PubMedAbstractsNER training groups; its dataset card has details. The notebook downloads
 the processed shards, tokenizer, and metadata. `DATASET` can instead point
 to a local completed dataset.
@@ -224,6 +245,19 @@ Each exported session bundle is retained; users can archive earlier bundles
 once they have copied the desired inference artifact.
 
 ## Decoding and export
+
+At the end of a run, `train.export_device_bundles` writes
+`minifield.magicbox.model/4` device bundles: `device-<run>-<step>-fp32` and,
+with a quantizer, `device-<run>-<step>-nf4`. Both trim the vocabulary to the
+dataset. The trimmed byte-level BPE tokenizer keeps every token the records
+use, every merge step that builds them, all 256 byte tokens and every special
+token, so the records tokenize exactly as before (checked over every compiled
+string) and other text still encodes in smaller pieces. On the v3 dataset it
+keeps 43,331 of 65,536 embedding rows and all 3,956,722 strings matched. The
+NF4 bundle stores encoder projections in the runtime's packed
+`minifield.nf4.v1` layout (codes and FP16 group scales) and the rest in FP32;
+it decodes to exactly the weights the NF4 student trained with. The notebook's
+last cell reloads both bundles and answers a sample request with each.
 
 `minifield.magicbox.model/2` bundles include weights, original encoder config,
 fusion settings, tokenizer/offset contract, file hashes, and decode policy.

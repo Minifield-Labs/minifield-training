@@ -251,12 +251,32 @@ class Corpus:
             )
         return names
 
+    def pointer_source_kinds(self, split: str) -> dict[str, set[str]]:
+        """Each source dataset's question types in one split."""
+        kinds: dict[str, set[str]] = {}
+        columns = self.split(split).select_columns(
+            ["provenance_json", "request_json"]
+        )
+        for chunk in columns.iter(batch_size=4096):
+            for provenance, request in zip(
+                chunk["provenance_json"], chunk["request_json"], strict=True
+            ):
+                kinds.setdefault(source_name(provenance), set()).update(
+                    question_kinds(request)
+                )
+        return kinds
+
     def pointer_records(
-        self, split: str, limit: int, source: str | None = None
+        self,
+        split: str,
+        limit: int,
+        source: str | None = None,
+        kind: str | None = None,
     ) -> Iterator[pointer.Record]:
         """Sample held-out pointer records with their original labels.
 
-        With ``source``, sample only that source dataset's records.
+        With ``source``, sample only that source dataset's records; with
+        ``kind``, only records asking at least one question of that type.
         """
         dataset = self.split(split).shuffle(seed=1729, keep_in_memory=False)
         if source is not None:
@@ -265,8 +285,25 @@ class Corpus:
                 input_columns="provenance_json",
                 keep_in_memory=False,
             )
+        if kind is not None:
+            dataset = dataset.filter(
+                lambda value: kind in question_kinds(value),
+                input_columns="request_json",
+                keep_in_memory=False,
+            )
         for index in range(min(limit, len(dataset)) if limit else len(dataset)):
             yield self.compile_pointer(dataset[index], split)
+
+
+def question_kinds(request_json: str) -> set[str]:
+    """The question types one request asks."""
+    questions = json_io.object_map(
+        json_io.object_map(json.loads(request_json))["questions"]
+    )
+    return {
+        str(json_io.object_map(question)["type"])
+        for question in questions.values()
+    }
 
 
 def source_name(provenance_json: str) -> str:

@@ -98,6 +98,13 @@ The example binds its selected encoder and heads through this interface.
 Independent tests train an unrelated four-scalar model and compare analytical
 gradients across multiple microbatch partitions.
 
+`schema_fields.make_distilled_step(forward, inventory, optimizer, plan, terms)`
+runs each microbatch twice, on the FP32 masters and on the plan's
+fake-quantized weights, and passes both outputs to `terms`. Gradients from
+both reach one set of masters, the quantized pass through the straight-
+through estimator, so one run trains the dense model and its quantized
+student. A tiny NF4 pointer model halves both losses in 40 updates on CPU.
+
 `schema_fields.make_step(..., terms=...)` accepts another objective's
 `terms(outputs, batch)`. Passing `objectives.pointer.terms` binds the joint
 pointer formulation to the same single-program update.

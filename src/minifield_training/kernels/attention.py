@@ -499,6 +499,42 @@ def splash_packed_causal_attention(
     return output * active[:, :, None, None].astype(output.dtype)
 
 
+def splash_bidirectional_attention(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    attention_mask: jax.Array,
+    segment_ids: jax.Array | None = None,
+    *,
+    window: int | None = None,
+    interpret: bool = False,
+) -> jax.Array:
+    """Apply noncausal Splash attention to packed or padded sequences.
+
+    Active tokens keep their segment id (1 when unpacked) and each inactive
+    token gets a private one, so queries see only active keys in their own
+    segment. ``window`` uses a static local mask reaching ``window // 2``
+    keys each way, which lets the kernel skip distant blocks. Inactive query
+    outputs are zeroed. ``interpret`` runs the kernel off TPU.
+    """
+    active = attention_mask > 0
+    if segment_ids is None:
+        segment_ids = jnp.ones(active.shape, jnp.int32)
+    active = active & (segment_ids != 0)
+    ids = _packed_segment_ids(active, segment_ids.astype(jnp.int32))
+
+    def make_mask(q_len: int, kv_len: int) -> "splash_attention.Mask":
+        if window is None:
+            return splash_attention.FullMask((q_len, kv_len))
+        radius = window // 2
+        return splash_attention.LocalMask(
+            (q_len, kv_len), window_size=(radius, radius), offset=0
+        )
+
+    output = _splash_mha(query, key, value, make_mask, ids, ids, interpret)
+    return output * active[:, :, None, None].astype(output.dtype)
+
+
 _CAUSAL_BACKENDS: dict[str, Callable[..., jax.Array]] = {
     "dense": dense_causal_attention,
     "cudnn": cudnn_causal_attention,

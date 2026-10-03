@@ -6,7 +6,7 @@ The notebook and this CLI share one composition: ``prepare`` builds the run,
 """
 
 import argparse
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import dataclasses
 import functools
 import hashlib
@@ -19,6 +19,7 @@ import numpy as np
 from examples.magicbox import bundle as magicbox_bundle
 from examples.magicbox import composition as magicbox
 from examples.magicbox import data
+from examples.magicbox import export
 from examples.magicbox import source
 from minifield_training.batching import pointer as batching
 from minifield_training.batching import stream as streams
@@ -31,6 +32,7 @@ from minifield_training.engine import step as engine_step
 from minifield_training.engine import training_run
 from minifield_training.evaluation import pointer as evaluate_pointer
 from minifield_training.evaluation import schema_fields as evaluate
+from minifield_training.kernels import bidirectional
 from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.lfm2_5 import model as lfm
@@ -39,8 +41,10 @@ from minifield_training.objectives import pointer as objective
 from minifield_training.objectives import schema_fields as weighting
 from minifield_training.optimizers import adamw
 from minifield_training.optimizers import optax_adamw
+from minifield_training.optimizers import schedule as lr_schedule
 from minifield_training.optimizers import state as optimizer_state
 from minifield_training.strategies import pretrained
+from minifield_training.strategies import quantization
 from minifield_training.strategies import schema_fields as strategy
 
 SPLITS = ("validation", "calibration", "test", "ood")
@@ -71,6 +75,17 @@ class Settings:
     run_id: str = "magicbox-lfm350m-v1"
     bf16: bool = True
     allow_sample: bool = False
+    # None keeps a constant learning rate; otherwise warm up for this many
+    # updates, then cosine-decay to final_lr_fraction at the last update.
+    warmup_updates: int | None = None
+    final_lr_fraction: float = 0.1
+    attention: encoder.Attention = encoder.DEFAULT_ATTENTION
+    # "nf4" or "ternary" trains the same masters as a dense parent and a
+    # fake-quantized student that distills from it; None trains dense only.
+    quantizer: str | None = None
+    quantized_weight: float = 1.0
+    distill_weight: float = 1.0
+    temperature: float = 2.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,6 +106,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         | streams.PlannedStream[object, pointer_records.Record]
     )
     inventory: core_parameters.FullParameterInventory
+    plan: quantization.NamedQuantization | None
     optimizer: adamw.AdamWConfig
     optimizer_id: str
     transaction: engine_step.Transaction
@@ -172,6 +188,22 @@ def prepare(settings: Settings) -> Run:
     )
     optimizer = adamw.AdamWConfig(learning_rate=settings.learning_rate)
     optax = settings.optimizer == "optax"
+    schedule = (
+        None
+        if settings.warmup_updates is None
+        else lr_schedule.WarmupCosine(
+            settings.warmup_updates,
+            stream.total_updates,
+            settings.final_lr_fraction,
+        )
+    )
+    if schedule is not None and not optax:
+        raise ValueError("A learning-rate schedule needs the optax optimizer")
+    plan = (
+        None
+        if settings.quantizer is None
+        else magicbox.quantization_plan(cfg, settings.quantizer)
+    )
     identity: dict[str, object] = {
         "source": dataclasses.asdict(encoder.SOURCE),
         "encoder": dataclasses.asdict(cfg),
@@ -195,6 +227,17 @@ def prepare(settings: Settings) -> Run:
         },
         "implementation": "magicbox-pointer-jax/1",
     }
+    # Optional features join the identity only when on, so earlier
+    # checkpoints keep theirs.
+    if settings.attention != encoder.DEFAULT_ATTENTION:
+        identity["attention"] = dataclasses.asdict(settings.attention)
+    if plan is not None:
+        identity["qat"] = {
+            "quantizer": plan.identity,
+            "quantized_weight": settings.quantized_weight,
+            "distill_weight": settings.distill_weight,
+            "temperature": settings.temperature,
+        }
     return Run(
         settings=settings,
         devices=devices,
@@ -210,15 +253,18 @@ def prepare(settings: Settings) -> Run:
         batches=batches,
         sizes=sizes,
         stream=stream,
-        inventory=magicbox.pointer_inventory(cfg, head),
+        inventory=magicbox.pointer_inventory(cfg, head, plan),
+        plan=plan,
         optimizer=optimizer,
         optimizer_id=(
-            optax_adamw.implementation_identity(optimizer)
+            optax_adamw.implementation_identity(optimizer, schedule)
             if optax
             else optimizer.implementation_identity
         ),
         transaction=(
-            optax_adamw.make_transaction if optax else adamw.make_transaction
+            functools.partial(optax_adamw.make_transaction, schedule=schedule)
+            if optax
+            else adamw.make_transaction
         ),
         identity=identity,
         source_id=hashlib.sha256(
@@ -283,29 +329,62 @@ def write_run(run: Run, output: Path) -> None:
     )
 
 
+def forward(
+    run: Run,
+) -> Callable[[types.Parameters, types.DeviceBatch], types.DeviceBatch]:
+    """The pointer model with this run's precision and attention."""
+    return magicbox.bind_pointer(
+        run.cfg,
+        run.head,
+        bf16=run.settings.bf16,
+        attention=run.settings.attention,
+    )
+
+
 def make_evaluator(run: Run) -> evaluate.Evaluator[pointer_records.Record]:
     """Held-out evaluation with the training shape and precision."""
     return evaluate.Evaluator(
         run.corpus.pointer_records,
-        evaluate_pointer.Predictor(
-            magicbox.bind_pointer(run.cfg, run.head, bf16=run.settings.bf16),
-            run.batches,
-        ),
+        evaluate_pointer.Predictor(forward(run), run.batches),
         names=data.KINDS,
         metrics=evaluate_pointer.Metrics,
     )
 
 
 def make_step(run: Run) -> engine_step.JitStep:
-    """The jitted training update for this run's model and optimizer."""
-    return strategy.make_step(
-        magicbox.bind_pointer(run.cfg, run.head, bf16=run.settings.bf16),
+    """The jitted training update for this run's model and optimizer.
+
+    With a quantizer, each update trains the dense parent and the quantized
+    student from the same masters.
+    """
+    if run.plan is None:
+        return strategy.make_step(
+            forward(run),
+            run.inventory,
+            run.optimizer,
+            mesh=run.mesh,
+            terms=objective.terms,
+            transaction=run.transaction,
+        )
+    return strategy.make_distilled_step(
+        forward(run),
         run.inventory,
         run.optimizer,
+        run.plan,
+        functools.partial(
+            objective.distilled_terms,
+            quantized_weight=run.settings.quantized_weight,
+            distill_weight=run.settings.distill_weight,
+            temperature=run.settings.temperature,
+        ),
         mesh=run.mesh,
-        terms=objective.terms,
         transaction=run.transaction,
     )
+
+
+def quantized(run: Run, params: types.Parameters) -> types.Parameters:
+    """The fake-quantized weights the student runs, or ``params`` if dense."""
+    return quantization.apply(params, run.inventory, run.plan)
 
 
 def combine(parts: Iterable[Mapping[str, float]]) -> dict[str, float]:
@@ -332,32 +411,125 @@ def final_evaluation(
     output: Path,
     limit: int,
 ) -> None:
-    """Evaluate each held-out source separately; ``limit`` 0 reads all.
+    """Evaluate each held-out source separately.
+
+    Each source samples up to ``limit`` records per question type; 0 reads
+    every record.
 
     ``final-<split>.json`` holds each source's metrics and an ``all`` entry
-    pooled by count.
+    pooled by count; rank and calibration metrics pool as count-weighted
+    means of each source's value. ``final-ood-degradation.json`` holds each
+    pooled metric's relative change from test to OOD, positive when worse.
+    A quantized run also writes ``final-<split>-<quantizer>.json`` for its
+    student.
     """
+    _final_evaluation(run, evaluator, params, output, limit, "")
+    if run.settings.quantizer is not None:
+        _final_evaluation(
+            run,
+            evaluator,
+            quantized(run, params),
+            output,
+            limit,
+            "-" + run.settings.quantizer,
+        )
+
+
+def _per_kind(
+    evaluator: evaluate.Evaluator[pointer_records.Record],
+    corpus: source.Corpus,
+    params: types.Parameters,
+    split: str,
+    name: str,
+    kinds: Iterable[str],
+    limit: int,
+) -> dict[str, float]:
+    """One source's metrics, sampling up to ``limit`` records per type.
+
+    Each question type gets its own sample of records that ask it, and keeps
+    only its own metrics from that pass, so rare types aren't drowned out by
+    common ones. ``loss`` and ``error_reduction`` weight the types equally.
+    """
+    metrics: dict[str, float] = {}
+    for kind in sorted(kinds):
+        reader = functools.partial(
+            corpus.pointer_records, source=name, kind=kind
+        )
+        sampled = dataclasses.replace(evaluator, records=reader).run(
+            params, split, limit
+        )
+        metrics.update(
+            {
+                key: value
+                for key, value in sampled.items()
+                if key.startswith(kind + "/")
+            }
+        )
+    for aggregate in ("loss", "error_reduction"):
+        values = [
+            value
+            for key, value in metrics.items()
+            if key.endswith("/" + aggregate) and key.count("/") == 1
+        ]
+        if values:
+            metrics[aggregate] = sum(values) / len(values)
+    reductions = [
+        key for key in metrics if key.endswith("/error_reduction/count")
+    ]
+    if "error_reduction" in metrics:
+        metrics["error_reduction/count"] = sum(
+            metrics[key] for key in reductions
+        )
+    return metrics
+
+
+def _final_evaluation(
+    run: Run,
+    evaluator: evaluate.Evaluator[pointer_records.Record],
+    params: types.Parameters,
+    output: Path,
+    limit: int,
+    suffix: str,
+) -> None:
+    pooled = {}
     for split in SPLITS:
         if not any(shard["split"] == split for shard in run.corpus.shards):
             continue
         by_source = {}
-        for name in sorted(set(run.corpus.pointer_sources(split))):
-            reader = functools.partial(run.corpus.pointer_records, source=name)
-            by_source[name] = dataclasses.replace(
-                evaluator, records=reader
-            ).run(params, split, limit)
+        for name, kinds in sorted(
+            run.corpus.pointer_source_kinds(split).items()
+        ):
+            by_source[name] = _per_kind(
+                evaluator, run.corpus, params, split, name, kinds, limit
+            )
             print(
-                json.dumps({"split": split, "source": name, **by_source[name]}),
+                json.dumps(
+                    {
+                        "split": split + suffix,
+                        "source": name,
+                        **by_source[name],
+                    }
+                ),
                 flush=True,
             )
         metrics = {"all": combine(by_source.values()), **by_source}
-        (output / f"final-{split}.json").write_text(
+        pooled[split] = metrics["all"]
+        (output / f"final-{split}{suffix}.json").write_text(
             json.dumps(metrics, indent=2)
         )
         print(
-            json.dumps({"split": split, "source": "all", **metrics["all"]}),
+            json.dumps(
+                {"split": split + suffix, "source": "all", **metrics["all"]}
+            ),
             flush=True,
         )
+    if "test" in pooled and "ood" in pooled:
+        # Relative change from test to OOD for every shared metric.
+        shift = evaluate_pointer.degradation(pooled["test"], pooled["ood"])
+        (output / f"final-ood-degradation{suffix}.json").write_text(
+            json.dumps(shift, indent=2)
+        )
+        print(json.dumps({"ood_degradation" + suffix: shift}), flush=True)
 
 
 def save_bundle(
@@ -377,6 +549,48 @@ def save_bundle(
             step=step,
         )
     return bundle
+
+
+def export_device_bundles(
+    run: Run, params: types.Parameters, output: Path, step: int
+) -> list[Path]:
+    """Write trimmed-vocabulary FP32 and, if quantized, packed bundles.
+
+    The trimmed tokenizer is cut from every record in the dataset and
+    checked to reproduce each of their encodings before any bundle is
+    written. Existing bundles are kept.
+    """
+    tokenizer = output / f"device-tokenizer-{run.source_id[:12]}"
+    # Written last, so its presence means the trimmed tokenizer is complete.
+    kept_path = tokenizer / "kept_ids.json"
+    if not kept_path.exists():
+        kept = export.write_trimmed_tokenizer(
+            run.settings.dataset / "tokenizer", tokenizer, run.corpus
+        )
+        kept_path.write_text(json.dumps(kept))
+    kept = tuple(json.loads(kept_path.read_text()))
+    trimmed = export.trimmed_parameters(params, kept)
+    bundles = []
+    quantizers: list[str | None] = [None]
+    if run.settings.quantizer is not None:
+        quantizers.append(run.settings.quantizer)
+    for quantizer in quantizers:
+        name = quantizer or "fp32"
+        bundle = output / f"device-{run.source_id[:12]}-{step:08d}-{name}"
+        if not bundle.exists():
+            magicbox_bundle.save_device(
+                bundle,
+                trimmed,
+                run.cfg,
+                run.head,
+                vocabulary=kept,
+                quantizer=quantizer,
+                encoder_config=run.config_path,
+                tokenizer=tokenizer,
+                step=step,
+            )
+        bundles.append(bundle)
+    return bundles
 
 
 def arguments() -> argparse.Namespace:
@@ -411,6 +625,16 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--fp32", action="store_true")
     parser.add_argument("--allow-sample", action="store_true")
     parser.add_argument("--evaluate-only", action="store_true")
+    parser.add_argument("--warmup-updates", type=int)
+    parser.add_argument("--final-lr-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--attention", choices=bidirectional.BACKENDS, default="dense"
+    )
+    parser.add_argument("--local-window", type=int)
+    parser.add_argument("--global-every", type=int, default=3)
+    parser.add_argument("--quantizer", choices=tuple(magicbox.QUANTIZERS))
+    parser.add_argument("--distill-weight", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=2.0)
     return parser.parse_args()
 
 
@@ -441,6 +665,14 @@ def main() -> None:
             run_id=args.run_id,
             bf16=not args.fp32,
             allow_sample=args.allow_sample,
+            warmup_updates=args.warmup_updates,
+            final_lr_fraction=args.final_lr_fraction,
+            attention=encoder.Attention(
+                args.attention, args.local_window, args.global_every
+            ),
+            quantizer=args.quantizer,
+            distill_weight=args.distill_weight,
+            temperature=args.temperature,
         )
     )
     output = args.output
@@ -492,6 +724,11 @@ def main() -> None:
         final_evaluation(
             run, evaluator, current["params"], output, args.final_records
         )
+    if completed:
+        for device in export_device_bundles(
+            run, current["params"], output, cursor.next_batch
+        ):
+            print(json.dumps({"device_bundle": str(device)}), flush=True)
     print(
         json.dumps(
             {
