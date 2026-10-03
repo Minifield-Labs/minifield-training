@@ -169,7 +169,7 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
 - BF16 activations, FP32 losses, parameters, and optimizer state.
 - AdamW: peak learning rate 0.00002, betas 0.9/0.95, epsilon 1e-8,
   weight decay 0.01 for matrices, gradient clipping 1.0. The rate warms up
-  linearly over 500 updates (`WARMUP_UPDATES`), then decays by cosine to 10%
+  linearly over 500 updates (`WARMUP_UPDATES`), then decays by cosine to 50%
   (`FINAL_LR_FRACTION`) at the last update.
 - Splash attention in the encoder (`ATTENTION = 'splash'`; `'dense'` is the
   XLA reference). `LOCAL_WINDOW` (off by default) makes all but every
@@ -186,12 +186,15 @@ Set `RUN_MODE = 'full'` for these full-training defaults:
 - Checkpoint every 250 updates; keep 2 complete states after evaluation.
 - 256 seeded validation records at each checkpoint, plus gold and predicted
   answers for 3 fixed validation requests (`SAMPLE_RECORDS`) in the progress
-  log. After all epochs, save the bundle, then evaluate up to 2,000 records
-  from each source in each of validation, calibration, test, and OOD
+  log. After all epochs, save the bundle, then evaluate up to 1,000 records
+  per question type from each source in each of validation, calibration,
+  test, and OOD
   (`FINAL_RECORDS = 0` evaluates all). `final-<split>.json` holds each
   source's metrics and an `all` entry pooled by count; the NF4 student's are
   in `final-<split>-nf4.json`. Device bundles are exported last.
 - Each session runs up to 8 hours. Rerunning resumes the next unread update.
+- `COPY_TO` copies the bundles, results and logs (not checkpoints) to a
+  folder such as Google Drive at the end, since Colab wipes `/content`.
 
 There is no automatic best-checkpoint selection. Token embeddings remain
 frozen throughout the run. Splash attention, local layers and the NF4 student
@@ -226,10 +229,10 @@ test artifact. Data parallelism replicates weights and optimizer state on
 each device. The smaller smoke batch reduces activation memory; actual TPU memory and throughput still require the hardware run.
 
 The default dataset is `protodotdesign/magicbox-v1`, revision
-`dcea9c9f19764ff657fc430a9dbd80772636df9e`. It contains 555,304 records across
+`30ecfbea3f4bc744687c3f6c1dd5bbc4a0736007`. It contains 447,422 records across
 151 Parquet shards, including 308,404 training records. This revision adds
-judged document-extraction records and structured role-map records, and keeps
-10% of the Nemotron-PII and
+judged document-extraction records and structured role-map records, keeps 5%
+of the Nemotron-PII test groups, and keeps 10% of the Nemotron-PII and
 PubMedAbstractsNER training groups; its dataset card has details. The notebook downloads
 the processed shards, tokenizer, and metadata. `DATASET` can instead point
 to a local completed dataset.

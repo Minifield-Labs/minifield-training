@@ -1,5 +1,6 @@
 """CPU schema admission and private-label separation contracts."""
 
+from collections.abc import Callable, Iterable
 import dataclasses
 import hashlib
 import json
@@ -23,6 +24,7 @@ from minifield_training.batching import schema_fields as batching
 from minifield_training.core import json_io
 from minifield_training.datasets import fields
 from minifield_training.datasets import pointer
+from minifield_training.evaluation import schema_fields as evaluate
 from minifield_training.objectives import schema_fields as objective
 
 
@@ -274,13 +276,19 @@ def _check_planned_stream(corpus: source.Corpus) -> None:
     ]
 
 
-def _sourced_corpus(names: list[str]) -> source.Corpus:
-    """A corpus whose train and test splits carry only ids and provenance."""
+def _sourced_corpus(
+    names: list[str], kinds: list[str] | None = None
+) -> source.Corpus:
+    """A corpus whose splits carry ids, provenance, and question types."""
     corpus = object.__new__(source.Corpus)
     rows = {
         "id": [f"r{index}" for index in range(len(names))],
         "provenance_json": [
             json.dumps({"source": {"dataset": name}}) for name in names
+        ],
+        "request_json": [
+            json.dumps({"questions": {"q": {"type": kind}}})
+            for kind in (kinds or ["extract"] * len(names))
         ],
     }
     corpus._splits = {  # pylint: disable=protected-access
@@ -320,3 +328,69 @@ def test_final_metrics_pool_sources_by_count() -> None:
         ]
     )
     assert pooled == {"extract/exact": 0.875, "extract/exact/count": 40}
+
+
+def test_corpus_samples_one_question_type_per_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Type filters pick records that ask that type, within one source."""
+    names = ["a", "a", "a", "b"]
+    kinds = ["choice", "extract", "choice", "choice"]
+    corpus = _sourced_corpus(names, kinds)
+    assert corpus.pointer_source_kinds("test") == {
+        "a": {"choice", "extract"},
+        "b": {"choice"},
+    }
+    monkeypatch.setattr(
+        corpus, "compile_pointer", lambda raw, split: cast(object, raw["id"])
+    )
+    chosen = list(corpus.pointer_records("test", 0, source="a", kind="choice"))
+    assert sorted(cast(list[str], chosen)) == ["r0", "r2"]
+
+
+@dataclasses.dataclass(frozen=True)
+class _CountingEvaluator:
+    """Reports how many records each type's pass read, under both types."""
+
+    records: Callable[[str, int], Iterable[object]]
+
+    def run(self, params: object, split: str, limit: int) -> dict[str, float]:
+        del params
+        seen = float(len(list(self.records(split, limit))))
+        return {
+            "choice/accuracy": seen,
+            "choice/error_reduction": 0.5,
+            "choice/error_reduction/count": seen,
+            "extract/exact": seen,
+            "extract/error_reduction": 1.0,
+            "extract/error_reduction/count": seen,
+            "loss": 99.0,
+        }
+
+
+def test_each_type_keeps_only_its_own_sampled_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A type's metrics come from its own sample; aggregates are recomputed."""
+    corpus = _sourced_corpus(
+        ["a"] * 4, ["choice", "extract", "choice", "choice"]
+    )
+    monkeypatch.setattr(
+        corpus, "compile_pointer", lambda raw, split: cast(object, raw["id"])
+    )
+    metrics = train._per_kind(  # pylint: disable=protected-access
+        cast(
+            evaluate.Evaluator[pointer.Record],
+            _CountingEvaluator(lambda *_: ()),
+        ),
+        corpus,
+        {},
+        "test",
+        "a",
+        {"choice", "extract"},
+        2,
+    )
+    assert metrics["choice/accuracy"] == 2 and metrics["extract/exact"] == 1
+    assert metrics["error_reduction"] == 0.75
+    assert metrics["error_reduction/count"] == 3
+    assert "loss" not in metrics

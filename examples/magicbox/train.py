@@ -411,7 +411,10 @@ def final_evaluation(
     output: Path,
     limit: int,
 ) -> None:
-    """Evaluate each held-out source separately; ``limit`` 0 reads all.
+    """Evaluate each held-out source separately.
+
+    Each source samples up to ``limit`` records per question type; 0 reads
+    every record.
 
     ``final-<split>.json`` holds each source's metrics and an ``all`` entry
     pooled by count; rank and calibration metrics pool as count-weighted
@@ -432,6 +435,54 @@ def final_evaluation(
         )
 
 
+def _per_kind(
+    evaluator: evaluate.Evaluator[pointer_records.Record],
+    corpus: source.Corpus,
+    params: types.Parameters,
+    split: str,
+    name: str,
+    kinds: Iterable[str],
+    limit: int,
+) -> dict[str, float]:
+    """One source's metrics, sampling up to ``limit`` records per type.
+
+    Each question type gets its own sample of records that ask it, and keeps
+    only its own metrics from that pass, so rare types aren't drowned out by
+    common ones. ``loss`` and ``error_reduction`` weight the types equally.
+    """
+    metrics: dict[str, float] = {}
+    for kind in sorted(kinds):
+        reader = functools.partial(
+            corpus.pointer_records, source=name, kind=kind
+        )
+        sampled = dataclasses.replace(evaluator, records=reader).run(
+            params, split, limit
+        )
+        metrics.update(
+            {
+                key: value
+                for key, value in sampled.items()
+                if key.startswith(kind + "/")
+            }
+        )
+    for aggregate in ("loss", "error_reduction"):
+        values = [
+            value
+            for key, value in metrics.items()
+            if key.endswith("/" + aggregate) and key.count("/") == 1
+        ]
+        if values:
+            metrics[aggregate] = sum(values) / len(values)
+    reductions = [
+        key for key in metrics if key.endswith("/error_reduction/count")
+    ]
+    if "error_reduction" in metrics:
+        metrics["error_reduction/count"] = sum(
+            metrics[key] for key in reductions
+        )
+    return metrics
+
+
 def _final_evaluation(
     run: Run,
     evaluator: evaluate.Evaluator[pointer_records.Record],
@@ -445,11 +496,12 @@ def _final_evaluation(
         if not any(shard["split"] == split for shard in run.corpus.shards):
             continue
         by_source = {}
-        for name in sorted(set(run.corpus.pointer_sources(split))):
-            reader = functools.partial(run.corpus.pointer_records, source=name)
-            by_source[name] = dataclasses.replace(
-                evaluator, records=reader
-            ).run(params, split, limit)
+        for name, kinds in sorted(
+            run.corpus.pointer_source_kinds(split).items()
+        ):
+            by_source[name] = _per_kind(
+                evaluator, run.corpus, params, split, name, kinds, limit
+            )
             print(
                 json.dumps(
                     {
