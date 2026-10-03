@@ -234,6 +234,17 @@ def token_f1(predicted: str | None, expected: str | None) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def kl_divergence(
+    targets: Sequence[float], predicted: Sequence[float]
+) -> float:
+    """KL(gold || predicted): the loss above the labels' own entropy."""
+    return sum(
+        gold * (math.log(gold) - math.log(max(guess, _EPSILON)))
+        for gold, guess in zip(targets, predicted, strict=True)
+        if gold > 0
+    )
+
+
 def _iou(left: tuple[int, int], right: tuple[int, int]) -> float:
     overlap = max(0, min(left[1], right[1]) - max(left[0], right[0]))
     union = max(left[1], right[1]) - min(left[0], right[0])
@@ -283,6 +294,7 @@ class Metrics:
             labels = [option.label for option in question.options]
             probabilities = json_io.object_map(answer["probabilities"])
             predicted = [float(str(probabilities[label])) for label in labels]
+            self._totals.add(name + "/kl", kl_divergence(targets, predicted))
             if question.kind == fields.Kind.CHOICE:
                 gold = int(np.argmax(targets))
                 correct = value == labels[gold]
@@ -364,6 +376,10 @@ class Metrics:
             )
             return
         self._totals.add(name + "/exact", float(predicted == expected))
+        self._totals.add(
+            name + "/accepted",
+            float(predicted == expected or predicted in question.accepted),
+        )
         self._totals.add(name + "/false_null", float(predicted is None))
         span = cast(tuple[int, int] | None, answer.get("character_span"))
         self._totals.add(
@@ -445,17 +461,31 @@ LOWER_IS_BETTER = (
     "mae",
     "nll",
     "ece",
+    "kl",
 )
+# Unbounded metrics compare relatively; rates and scores in [0, 1] compare
+# by absolute difference, since a relative change from near zero explodes.
+RELATIVE = ("loss", "nll", "mae", "kl")
 
 
 def degradation(
     in_domain: dict[str, float], shifted: dict[str, float]
 ) -> dict[str, float]:
-    """Relative change from in-domain to shifted metrics; positive is worse."""
+    """Change from in-domain to shifted metrics; positive is worse.
+
+    Loss, NLL, MAE and KL report the relative change; every other metric,
+    a rate or score in [0, 1], reports the absolute difference.
+    """
     result = {}
     for name, base in in_domain.items():
-        if name.endswith("/count") or name not in shifted or not base:
+        if name.endswith("/count") or name not in shifted:
             continue
-        sign = 1 if name.rsplit("/", 1)[-1] in LOWER_IS_BETTER else -1
-        result[name] = sign * (shifted[name] - base) / abs(base)
+        metric = name.rsplit("/", 1)[-1]
+        sign = 1 if metric in LOWER_IS_BETTER else -1
+        change = shifted[name] - base
+        if metric in RELATIVE:
+            if not base:
+                continue
+            change /= abs(base)
+        result[name] = sign * change
     return result

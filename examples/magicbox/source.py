@@ -1,6 +1,7 @@
 """Verified Parquet intake and disk-backed, deterministic training epochs."""
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -150,6 +151,7 @@ class Corpus:
             self.tokenizer.encode,
             score_width=score_width,
         )
+        record = with_accepted(record, json_io.object_map(raw))
         self._recheck(
             record.source,
             {question.key: question.span for question in record.questions},
@@ -293,6 +295,32 @@ class Corpus:
             )
         for index in range(min(limit, len(dataset)) if limit else len(dataset)):
             yield self.compile_pointer(dataset[index], split)
+
+
+def with_accepted(
+    record: pointer.Record, raw: Mapping[str, object]
+) -> pointer.Record:
+    """Attach each question's alternative acceptable answers from provenance.
+
+    The dataset records them as character spans of the record's text, for
+    example every mention of an entity when one is the gold answer.
+    """
+    provenance = json_io.object_map(json.loads(str(raw["provenance_json"])))
+    conversion = json_io.object_map(provenance.get("conversion", {}))
+    spans = json_io.object_map(conversion.get("acceptable_spans", {}))
+    if not spans:
+        return record
+    questions = []
+    for question in record.questions:
+        found = spans.get(question.key, [])
+        texts = {
+            record.text[int(str(start)) : int(str(end))]
+            for start, end in cast(list[list[object]], found)
+        }
+        questions.append(
+            dataclasses.replace(question, accepted=tuple(sorted(texts)))
+        )
+    return dataclasses.replace(record, questions=tuple(questions))
 
 
 def question_kinds(request_json: str) -> set[str]:

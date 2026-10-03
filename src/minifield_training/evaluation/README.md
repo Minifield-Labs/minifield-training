@@ -39,11 +39,13 @@ Beyond those means, `pointer.Metrics` reports:
 | Choice | `nll` of the gold option, 10-bin `ece` on top-1 confidence, top-2 `margin` |
 | Binary | `auroc` (gold ≥ 0.5 is positive), soft-label `nll`, 10-bin `ece` |
 | Ordinal | `spearman` between predicted and gold expected levels, `within_1` (rounded prediction within 1 of the gold level) |
-| Extraction | lowercase whitespace `token_f1` (two nulls score 1), character `span_iou` on answerable questions, `null_f1` with "not stated" as positive |
+| Extraction | lowercase whitespace `token_f1` (two nulls score 1), character `span_iou` on answerable questions, `null_f1` with "not stated" as positive, `accepted` (the gold or any `Question.accepted` alternative, such as another mention of the same entity) |
+| Choice, binary, ordinal | `kl` from the gold distribution to the predicted one: the loss above the labels' own entropy, which matters for vote-share labels |
 
 `<type>/error_reduction` is `1 - error / baseline` against a trivial answer:
 always null (exact-or-null error), a uniform guess (choice error), 0.5
 (Brier), or the middle level (MAE). `error_reduction` weights the types
 equally. `pointer.degradation(in_domain, shifted)` gives each shared metric's
-relative change, signed so positive is worse. AUROC, Spearman and ECE need at
+change, signed so positive is worse: relative for loss, NLL, MAE and KL, and
+an absolute difference for rates and scores in [0, 1]. AUROC, Spearman and ECE need at
 least 2 questions; tests check each against hand-derived values.

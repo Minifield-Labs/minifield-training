@@ -394,3 +394,20 @@ def test_each_type_keeps_only_its_own_sampled_metrics(
     assert metrics["error_reduction"] == 0.75
     assert metrics["error_reduction/count"] == 3
     assert "loss" not in metrics
+
+
+def test_accepted_answers_come_from_provenance() -> None:
+    """Acceptable character spans become each question's alternative texts."""
+    record = pointer.Record(
+        "r",
+        "Ada met Ada Lee",
+        fields.Encoding((1,), ((0, 0),), (True,)),
+        (pointer.Question("who", 0, (1,), (), (0.0,), True),),
+    )
+    raw = {
+        "provenance_json": json.dumps(
+            {"conversion": {"acceptable_spans": {"who": [[0, 3], [8, 15]]}}}
+        )
+    }
+    accepted = source.with_accepted(record, raw).questions[0].accepted
+    assert accepted == ("Ada", "Ada Lee")

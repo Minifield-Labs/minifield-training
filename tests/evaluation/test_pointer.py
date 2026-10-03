@@ -166,12 +166,25 @@ def test_rank_and_calibration_statistics() -> None:
         {
             "choice/accuracy": 0.8,
             "binary/brier": 0.1,
+            "extract/false_null": 0.001,
+            "choice/loss": 0.5,
             "choice/accuracy/count": 9,
         },
-        {"choice/accuracy": 0.6, "binary/brier": 0.15},
+        {
+            "choice/accuracy": 0.6,
+            "binary/brier": 0.15,
+            "extract/false_null": 0.011,
+            "choice/loss": 0.75,
+        },
     )
+    # Rates change absolutely, so a tiny base can't explode; losses relatively.
     assert shift == pytest.approx(
-        {"choice/accuracy": 0.25, "binary/brier": 0.5}
+        {
+            "choice/accuracy": 0.2,
+            "binary/brier": 0.05,
+            "extract/false_null": 0.01,
+            "choice/loss": 0.5,
+        }
     )
 
 
@@ -193,3 +206,28 @@ def test_null_f1_treats_not_stated_as_the_positive_class() -> None:
             [0.0],
         )
     assert metrics.means()["extract/null_f1"] == pytest.approx(4 / 6)
+
+
+def test_accepted_answers_and_kl() -> None:
+    """Another listed mention counts as accepted; KL is zero only at gold."""
+    record = _record()
+    placed, start, end = _logits(record)
+    # Gold becomes "Lee sent"; the decoded "Ada Lee" is a listed alternative.
+    name = dataclasses.replace(
+        record.questions[0], span=(2, 4), accepted=("Ada Lee",)
+    )
+    shifted = dataclasses.replace(
+        record, questions=(name, *record.questions[1:])
+    )
+    metrics = evaluation.Metrics(("extract", "choice", "binary", "ordinal"))
+    metrics.record(
+        shifted,
+        evaluation.decode(shifted, placed, start, end),
+        [1.0, 2.0, 3.0, 4.0],
+    )
+    means = metrics.means()
+    assert means["extract/exact"] == 0 and means["extract/accepted"] == 1
+    assert means["binary/kl"] == pytest.approx(
+        0.2 * math.log(0.2 / 0.25) + 0.8 * math.log(0.8 / 0.75)
+    )
+    assert evaluation.kl_divergence([0.5, 0.5], [0.5, 0.5]) == 0

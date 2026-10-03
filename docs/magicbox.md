@@ -205,8 +205,8 @@ match/false-positive/false-null rates, choice accuracy, binary Brier score,
 and ordinal MAE, plus the calibration, ranking, F1, IoU and equal-type
 error-reduction metrics listed in [the evaluation
 README](../src/minifield_training/evaluation/README.md). Final evaluation also
-writes `final-ood-degradation.json`: each pooled metric's relative change from
-test to OOD, positive when worse. Exact extraction compares the dataset's canonical gold span.
+writes `final-ood-degradation.json`: each pooled metric's change from test to
+OOD, positive when worse (relative for losses, absolute for rates). Exact extraction compares the dataset's canonical gold span.
 Alternative acceptable spans in provenance aren't included in that metric.
 
 Losses first average selectable token BCE within each extraction field, then
@@ -229,10 +229,12 @@ test artifact. Data parallelism replicates weights and optimizer state on
 each device. The smaller smoke batch reduces activation memory; actual TPU memory and throughput still require the hardware run.
 
 The default dataset is `protodotdesign/magicbox-v1`, revision
-`30ecfbea3f4bc744687c3f6c1dd5bbc4a0736007`. It contains 447,422 records across
+`8b93d47f2d5d19931d6bd2e623630309c4552dcf`. It contains 447,422 records across
 151 Parquet shards, including 308,404 training records. This revision adds
-judged document-extraction records and structured role-map records, keeps 5%
-of the Nemotron-PII test groups, and keeps 10% of the Nemotron-PII and
+judged document-extraction records and structured role-map records, gives 30%
+of templated training extraction questions a short label-style instruction,
+adds verified "not stated" email and URL questions to Nemotron-PII training
+windows, keeps 5% of the Nemotron-PII test groups, and keeps 10% of the Nemotron-PII and
 PubMedAbstractsNER training groups; its dataset card has details. The notebook downloads
 the processed shards, tokenizer, and metadata. `DATASET` can instead point
 to a local completed dataset.
