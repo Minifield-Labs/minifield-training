@@ -231,3 +231,25 @@ def test_accepted_answers_and_kl() -> None:
         0.2 * math.log(0.2 / 0.25) + 0.8 * math.log(0.8 / 0.75)
     )
     assert evaluation.kl_divergence([0.5, 0.5], [0.5, 0.5]) == 0
+
+
+@pytest.mark.parametrize(
+    ("targets", "correct"), [((0.5, 0.5), 1.0), ((1.0, 0.0), 0.0)]
+)
+def test_soft_choice_target_accepts_any_top_option(
+    targets: tuple[float, float], correct: float
+) -> None:
+    """Choosing "b" is right when "b" shares the top target probability."""
+    record = _record()
+    placed, start, end = _logits(record)
+    tier = dataclasses.replace(record.questions[1], targets=targets)
+    record = dataclasses.replace(
+        record, questions=(record.questions[0], tier, *record.questions[2:])
+    )
+    metrics = evaluation.Metrics(("extract", "choice", "binary", "ordinal"))
+    metrics.record(
+        record,
+        evaluation.decode(record, placed, start, end),
+        [1.0, 2.0, 3.0, 4.0],
+    )
+    assert metrics.means()["choice/accuracy"] == correct

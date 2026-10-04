@@ -60,8 +60,8 @@ class Layout:
 
 
 def layout(record: pointer.Record) -> tuple[list[int], Layout]:
-    """Concatenate each question with its options, then the source."""
-    ids: list[int] = []
+    """Join the prefix, each question with its options, then the source."""
+    ids: list[int] = list(record.prefix)
     queries: list[int] = []
     options: list[tuple[int, ...]] = []
     for question in record.questions:

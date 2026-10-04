@@ -105,6 +105,10 @@ then supplies ordering and compilation to the shared epoch stream.
 `composition.py` selects the LFM encoder and MagicBox heads; `bundle.py` interprets
 the product bundle metadata through shared checkpoint I/O. The CLIs bind these
 adapters to reusable batching, objectives, evaluation, and training lifecycle.
+`train.Model` names the pieces another pointer model can swap: its corpus,
+extra trainable parameters, forward, initialization, the weights a bundle
+stores, and tokenizer renames. `MAGICBOX` is the default; the
+[tool-call model](../toolcalls/README.md) is the other one.
 `smoke.py` and `parallel_smoke.py` are bounded architecture diagnostics.
 No sibling source tree is imported.
 

@@ -7,7 +7,7 @@ dropped, so our records tokenize exactly as before and any other text still
 encodes, in smaller pieces. Embedding rows follow the kept IDs.
 """
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 import json
 from pathlib import Path
 import tempfile
@@ -137,6 +137,25 @@ def _renumber_special_ids(processor: object, renumber: dict[int, int]) -> None:
                 _renumber_special_ids(value, renumber)
 
 
+def rename_special_tokens(
+    spec: dict[str, object], rename: Mapping[str, str]
+) -> dict[str, object]:
+    """Give added special tokens new strings, keeping their IDs."""
+    if not rename:
+        return spec
+    renamed = json.loads(json.dumps(spec))
+    contents = {str(item["content"]) for item in renamed["added_tokens"]}
+    if set(rename) - contents or set(rename.values()) & contents:
+        raise ValueError("Renames must map existing tokens to unused names")
+    for item in renamed["added_tokens"]:
+        item["content"] = rename.get(item["content"], item["content"])
+    vocab = renamed["model"]["vocab"]
+    for old, new in rename.items():
+        if old in vocab:
+            vocab[new] = vocab.pop(old)
+    return cast(dict[str, object], renamed)
+
+
 def check_trimmed(
     original: Tokenizer,
     trimmed: Tokenizer,
@@ -174,14 +193,22 @@ def trimmed_parameters(
 
 
 def write_trimmed_tokenizer(
-    dataset_tokenizer: Path, destination: Path, corpus: source.Corpus
+    dataset_tokenizer: Path,
+    destination: Path,
+    corpus: source.Corpus,
+    rename: Mapping[str, str] | None = None,
 ) -> tuple[int, ...]:
-    """Trim to the corpus, verify every corpus text, and write the assets."""
+    """Trim to the corpus, verify every corpus text, and write the assets.
+
+    ``rename`` gives special tokens readable names, such as a model's marker
+    tokens; their IDs and every encoding stay the same.
+    """
     original = Tokenizer.from_file(str(dataset_tokenizer / "tokenizer.json"))
     spec = json.loads((dataset_tokenizer / "tokenizer.json").read_text())
     trimmed_spec, kept = trim_tokenizer(
         spec, used_ids(original, corpus_texts(corpus))
     )
+    trimmed_spec = rename_special_tokens(trimmed_spec, rename or {})
     destination.mkdir(parents=True, exist_ok=True)
     path = destination / "tokenizer.json"
     with tempfile.NamedTemporaryFile(
@@ -198,6 +225,8 @@ def write_trimmed_tokenizer(
         trimmed_from=magicbox_tokenizer.TOKENIZER_SHA256,
         vocab_size=len(kept),
     )
+    if rename:
+        contract["renamed"] = dict(rename)
     (destination / "contract.json").write_text(
         json.dumps(contract, indent=2), encoding="utf-8"
     )

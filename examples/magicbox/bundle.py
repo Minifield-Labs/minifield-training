@@ -84,6 +84,7 @@ def save_pointer(
     encoder_config: Path,
     tokenizer: Path,
     step: int,
+    template: str = data.POINTER_TEMPLATE,
 ) -> None:
     """Write a joint pointer bundle; its template versions the input layout."""
     _save(
@@ -93,7 +94,7 @@ def save_pointer(
         {
             "format": POINTER_FORMAT,
             "head": dataclasses.asdict(head),
-            "template": data.POINTER_TEMPLATE,
+            "template": template,
         },
         encoder_config=encoder_config,
         tokenizer=tokenizer,
@@ -112,6 +113,7 @@ def save_device(
     encoder_config: Path,
     tokenizer: Path,
     step: int,
+    template: str = data.POINTER_TEMPLATE,
 ) -> None:
     """Write a device bundle from trimmed-vocabulary masters.
 
@@ -134,7 +136,7 @@ def save_device(
         {
             "format": DEVICE_FORMAT,
             "head": dataclasses.asdict(head),
-            "template": data.POINTER_TEMPLATE,
+            "template": template,
             "vocabulary": {
                 "size": len(vocabulary),
                 "trimmed_from": tokenizer_contract_source(tokenizer),
@@ -222,7 +224,9 @@ def _configuration(
 
 
 def _pointer_configuration(
-    directory: Path, metadata: dict[str, object]
+    directory: Path,
+    metadata: dict[str, object],
+    templates: tuple[str, ...] = (data.POINTER_TEMPLATE,),
 ) -> tuple[lfm.Config, pointer.Config]:
     """Admit exactly the saved pointer widths and input template."""
     cfg = _encoder_config(directory, metadata, (POINTER_FORMAT, DEVICE_FORMAT))
@@ -230,7 +234,7 @@ def _pointer_configuration(
         vocabulary = json_io.object_map(metadata["vocabulary"])
         cfg = dataclasses.replace(cfg, vocab_size=int(str(vocabulary["size"])))
     head = json_io.object_map(metadata["head"])
-    if metadata.get("template") != data.POINTER_TEMPLATE or set(head) != {
+    if metadata.get("template") not in templates or set(head) != {
         field.name for field in dataclasses.fields(pointer.Config)
     }:
         raise ValueError("Unknown pointer template or head configuration")
@@ -259,8 +263,12 @@ def load(
 
 def load_pointer(
     directory: Path,
+    templates: tuple[str, ...] = (data.POINTER_TEMPLATE,),
 ) -> tuple[lfm.Config, pointer.Config, types.Parameters, dict[str, object]]:
     """Restore a joint pointer bundle and its decode settings.
+
+    ``templates`` lists the input layouts the caller can compile requests
+    for; a bundle trained on another layout is refused.
 
     Device bundles return the trimmed vocabulary size in the config and, when
     packed, the decoded FP32 weights the quantized model runs.
@@ -277,7 +285,7 @@ def load_pointer(
     def inventory(
         loaded: dict[str, object],
     ) -> core_parameters.FullParameterInventory:
-        cfg, head = _pointer_configuration(directory, loaded)
+        cfg, head = _pointer_configuration(directory, loaded, templates)
         plan = (
             None
             if weights == "fp32"
@@ -291,5 +299,5 @@ def load_pointer(
         inventory=inventory,
         packed=weights != "fp32",
     )
-    cfg, head = _pointer_configuration(directory, metadata)
+    cfg, head = _pointer_configuration(directory, metadata, templates)
     return cfg, head, parameters, json_io.object_map(metadata["decode"])
