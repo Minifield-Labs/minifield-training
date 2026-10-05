@@ -107,3 +107,12 @@ dataset and save to separate run directories.
 
 See [the architecture and run guide](docs/magicbox.md) and
 [the example README](examples/magicbox/README.md).
+
+## Tool-call training
+
+[The tool-call notebook](examples/colab_toolcalls_lfm350m_tpu.ipynb) trains
+a model that picks the next tool and fills its arguments, on MagicBox's
+pointer architecture with trainable role markers, a 12k-token vocabulary,
+the 230M or 350M encoder and a ternary warm-up on FineWeb-Edu. It runs the 4-stage
+`protodotdesign/toolcalls-v1` curriculum in order, warm-starting each stage
+from the last. See [the example README](examples/toolcalls/README.md).

@@ -40,20 +40,29 @@ class Question:
 
 @dataclasses.dataclass(frozen=True)
 class Record:
-    """One source and every question asked about it."""
+    """One source and every question asked about it.
+
+    ``prefix`` holds tokens placed before the first question, such as a
+    leading BOS that keeps the encoder's pretraining start of sequence.
+    """
 
     id: str
     text: str
     source: fields.Encoding
     questions: tuple[Question, ...]
+    prefix: tuple[int, ...] = ()
 
     @property
     def sequence_tokens(self) -> int:
-        """Count the joint sequence: every query, option, and the source."""
-        return len(self.source.ids) + sum(
-            len(question.query)
-            + sum(len(option.ids) for option in question.options)
-            for question in self.questions
+        """Count the joint sequence: prefix, queries, options, and source."""
+        return (
+            len(self.prefix)
+            + len(self.source.ids)
+            + sum(
+                len(question.query)
+                + sum(len(option.ids) for option in question.options)
+                for question in self.questions
+            )
         )
 
 

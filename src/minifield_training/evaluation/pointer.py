@@ -297,7 +297,10 @@ class Metrics:
             self._totals.add(name + "/kl", kl_divergence(targets, predicted))
             if question.kind == fields.Kind.CHOICE:
                 gold = int(np.argmax(targets))
-                correct = value == labels[gold]
+                # With a soft target, every top-probability option is right.
+                correct = str(value) in labels and targets[
+                    labels.index(str(value))
+                ] == max(targets)
                 ranked = sorted(predicted, reverse=True)
                 self._totals.add(name + "/accuracy", float(correct))
                 self._totals.add(

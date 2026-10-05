@@ -1,6 +1,6 @@
 """Bind the selected LFM encoder to the MagicBox model and parameter names."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import functools
 
 import jax
@@ -33,15 +33,20 @@ def pointer_inventory(
     cfg: lfm.Config,
     head: pointer.Config,
     plan: quantization.NamedQuantization | None = None,
+    extra: Mapping[str, tuple[int, ...]] | None = None,
 ) -> core_parameters.FullParameterInventory:
     """Train the encoder and pointer projections; freeze token embeddings.
 
     With ``plan``, the inventory also declares which encoder projections
     train quantization-aware; embeddings, norms and pointer heads stay FP32.
+    ``extra`` adds trainable tensors with no weight decay or quantization,
+    such as learned marker vectors.
     """
     if cfg.hidden_size != head.encoder_width:
         raise ValueError("Encoder and pointer widths differ")
-    dense = _build_inventory(cfg, pointer.shapes(head), True)
+    head_shapes = {**pointer.shapes(head), **(extra or {})}
+    undecayed = frozenset(extra or {})
+    dense = _build_inventory(cfg, head_shapes, True, undecayed=undecayed)
     if plan is None:
         return dense
     projections = encoder_projections(cfg)
@@ -59,8 +64,9 @@ def pointer_inventory(
     }
     return _build_inventory(
         cfg,
-        pointer.shapes(head),
+        head_shapes,
         True,
+        undecayed=undecayed,
         quantization_profile=plan.identity,
         quantized_names=quantization.select(dense, plan, roles),
     )
@@ -90,6 +96,7 @@ def _build_inventory(
     head_shapes: dict[str, tuple[int, ...]],
     freeze_embeddings: bool,
     *,
+    undecayed: frozenset[str] = frozenset(),
     quantization_profile: str | None = None,
     quantized_names: frozenset[str] = frozenset(),
 ) -> core_parameters.FullParameterInventory:
@@ -105,7 +112,7 @@ def _build_inventory(
         decayed_names=frozenset(
             name
             for name, shape in shapes.items()
-            if len(shape) == 2 and name not in frozen
+            if len(shape) == 2 and name not in frozen | undecayed
         ),
         frozen_names=frozen,
         format_id="minifield.magicbox.parameters/1",
