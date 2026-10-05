@@ -94,13 +94,24 @@ def _atomic_save(
     arrays: Mapping[str, npt.NDArray[np.generic]],
     metadata: dict[str, str],
 ) -> None:
-    """Write a safetensors file that appears only when complete."""
+    """Write a safetensors file that appears only when complete.
+
+    safetensors stores each array's raw memory, and device transfers can
+    return column-major arrays, so every array is made row-major first.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=f".{path.name}-", dir=path.parent
     ) as temporary:
         staged = Path(temporary) / path.name
-        save_file(dict(arrays), str(staged), metadata=metadata)
+        save_file(
+            {
+                name: np.ascontiguousarray(value)
+                for name, value in arrays.items()
+            },
+            str(staged),
+            metadata=metadata,
+        )
         if path.exists():
             raise FileExistsError(path)
         os.rename(staged, path)
@@ -169,7 +180,7 @@ class PackedGroup128Output:
                 arrays[spec.name + ".codes"] = pack(np.asarray(codes), per_byte)
                 arrays[spec.name + ".scales"] = np.asarray(scales)
             else:
-                arrays[spec.name] = np.ascontiguousarray(np.asarray(value))
+                arrays[spec.name] = np.asarray(value)
         _atomic_save(
             path,
             arrays,

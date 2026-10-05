@@ -61,3 +61,39 @@ def test_packed_output_decodes_to_the_qat_effective_weights(
     effective = quantization.apply(masters, inventory, plan)
     for name, value in effective.items():
         np.testing.assert_array_equal(loaded[name], value)
+
+
+def test_column_major_device_arrays_are_written_in_row_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TPU transfers can return column-major arrays; bytes must be row order."""
+    kind = "nf4-g128-absmax-f16-v1"
+    plan = quantization.NamedQuantization(
+        kernels.Group128Quantizer(kind), frozenset({"matrix"})
+    )
+    inventory = parameters.build_inventory(
+        {"matrix": (4, 256)},
+        format_id="packed-test/1",
+        decayed_names=frozenset({"matrix"}),
+        quantization_profile=plan.identity,
+        quantized_names=frozenset({"matrix"}),
+    )
+    masters = {"matrix": jax.random.normal(jax.random.PRNGKey(1), (4, 256))}
+    original = kernels.codes
+
+    def column_major(
+        weight: jax.Array, name: str
+    ) -> tuple[np.ndarray, np.ndarray]:  # type: ignore[type-arg]
+        codes, scales = original(weight, name)
+        return np.asfortranarray(codes), np.asfortranarray(scales)
+
+    monkeypatch.setattr(kernels, "codes", column_major)
+    path = tmp_path / "model.safetensors"
+    inference_output.PackedGroup128Output().write(
+        path, masters, inventory, source_model="m", source_revision="r"
+    )
+    loaded = inference_output.load_packed(
+        path, inventory, sha256=json_io.digest_file(path)
+    )
+    expected = quantization.apply(masters, inventory, plan)
+    np.testing.assert_array_equal(loaded["matrix"], expected["matrix"])
