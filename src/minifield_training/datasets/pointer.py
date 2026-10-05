@@ -22,7 +22,9 @@ class Question:
     ``options``. An extraction question has exactly one option, meaning the
     source doesn't answer it: ``targets[0]`` is that option's probability and
     ``span`` holds the answer's ``[start, end)`` source tokens otherwise.
-    Unsupervised questions carry all-zero targets.
+    ``accepted`` lists other source strings that also answer it, such as
+    further mentions of the same entity; training ignores them. Unsupervised
+    questions carry all-zero targets.
     """
 
     key: str
@@ -33,6 +35,7 @@ class Question:
     supervised: bool
     span: tuple[int, int] | None = None
     legend: tuple[str, ...] = ()
+    accepted: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)

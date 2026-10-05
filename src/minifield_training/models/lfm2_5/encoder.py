@@ -1,6 +1,7 @@
 """Pinned LFM2.5 encoder: bidirectional attention and centered short conv."""
 
 from collections.abc import Callable, Mapping
+import dataclasses
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +32,47 @@ SOURCE = contracts.PretrainedSource(
         "cd70e404c3c6c1756b2cf5dc75de2a87788b460e3a6156c1a4ab134b824c2706"
     ),
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class Attention:
+    """Attention kernel and the optional local/global layer layout.
+
+    With ``local_window``, attention layers alternate as in ModernBERT: the
+    first of every ``global_every`` attention layers stays global and the
+    rest see only ``local_window // 2`` tokens each way. Weights don't change.
+    """
+
+    backend: str = "dense"
+    local_window: int | None = None
+    global_every: int = 3
+
+    def __post_init__(self) -> None:
+        """Reject unknown kernels and layouts before tracing."""
+        if self.backend not in bidirectional.BACKENDS:
+            raise ValueError(f"Unknown attention backend: {self.backend}")
+        if self.local_window is not None and (
+            self.local_window < 2 or self.local_window % 2
+        ):
+            raise ValueError("local_window must be a positive even width")
+        if self.global_every < 1:
+            raise ValueError("global_every must be positive")
+
+    def layer_kinds(self, layer_types: tuple[str, ...]) -> tuple[str, ...]:
+        """Rename the attention layers that run locally."""
+        if self.local_window is None:
+            return layer_types
+        kinds, attention_index = [], 0
+        for kind in layer_types:
+            if kind == "full_attention":
+                if attention_index % self.global_every:
+                    kind = "local_attention"
+                attention_index += 1
+            kinds.append(kind)
+        return tuple(kinds)
+
+
+DEFAULT_ATTENTION = Attention()
 
 
 class Adapter:
@@ -70,6 +112,7 @@ def _block(
     kind: str,
     segment_ids: jax.Array | None = None,
     positions: jax.Array | None = None,
+    attention_options: Attention = DEFAULT_ATTENTION,
 ) -> jax.Array:
     """Compose the source's operator with the family's shared SwiGLU tail."""
     norm = normalization.rms_norm(
@@ -101,7 +144,19 @@ def _block(
             head_dim=cfg.head_dim,
             positions=positions,
         )
-        mixed = bidirectional.attention(query, key, value, mask, segment_ids)
+        mixed = bidirectional.attention(
+            query,
+            key,
+            value,
+            mask,
+            segment_ids,
+            window=(
+                attention_options.local_window
+                if kind == "local_attention"
+                else None
+            ),
+            backend=attention_options.backend,
+        )
         residual = linear.full_linear(
             mixed.reshape(hidden.shape), weights_attn.out
         )
@@ -117,6 +172,7 @@ def _scan_blocks(
     cfg: model.Config,
     segment_ids: jax.Array | None = None,
     positions: jax.Array | None = None,
+    attention_options: Attention = DEFAULT_ATTENTION,
 ) -> jax.Array:
     """Keep one compiled block per operator kind, with distinct layer weights.
 
@@ -127,6 +183,7 @@ def _scan_blocks(
     """
     if not cfg.layer_types:
         return hidden
+    layer_types = attention_options.layer_kinds(tuple(cfg.layer_types))
     layers = [
         types.slice_parameters(params, f"lfm2.layers.{index}.")
         for index in range(len(cfg.layer_types))
@@ -136,12 +193,12 @@ def _scan_blocks(
         name: jnp.stack([layer[name] for layer in layers])
         for name in sorted(common_names)
     }
-    kinds = tuple(dict.fromkeys(cfg.layer_types))
+    kinds = tuple(dict.fromkeys(layer_types))
     operators = {}
     for kind in kinds:
         group = [
             layer
-            for layer, layer_kind in zip(layers, cfg.layer_types, strict=True)
+            for layer, layer_kind in zip(layers, layer_types, strict=True)
             if layer_kind == kind
         ]
         operators[kind] = {
@@ -150,10 +207,10 @@ def _scan_blocks(
         }
     counts = dict.fromkeys(kinds, 0)
     offsets = []
-    for kind in cfg.layer_types:
+    for kind in layer_types:
         offsets.append(counts[kind])
         counts[kind] += 1
-    indices = jnp.asarray([kinds.index(kind) for kind in cfg.layer_types])
+    indices = jnp.asarray([kinds.index(kind) for kind in layer_types])
 
     def step(
         activation: jax.Array,
@@ -179,6 +236,7 @@ def _scan_blocks(
                     kind=kind,
                     segment_ids=segment_ids,
                     positions=positions,
+                    attention_options=attention_options,
                 )
 
             return apply
@@ -208,6 +266,7 @@ def encode(
     bf16: bool = True,
     segment_ids: jax.Array | None = None,
     positions: jax.Array | None = None,
+    attention_options: Attention = DEFAULT_ATTENTION,
 ) -> jax.Array:
     """Encode complete tokens, rematerializing blocks during reverse mode.
 
@@ -231,7 +290,9 @@ def encode(
         raise ValueError("Packed segment IDs and positions must match ids")
     dtype = jnp.bfloat16 if bf16 else jnp.float32
     hidden = params["lfm2.embed_tokens.weight"][ids].astype(dtype)
-    hidden = _scan_blocks(hidden, mask, params, cfg, segment_ids, positions)
+    hidden = _scan_blocks(
+        hidden, mask, params, cfg, segment_ids, positions, attention_options
+    )
     return (
         normalization.rms_norm(
             hidden, params["lfm2.embedding_norm.weight"], cfg.norm_eps

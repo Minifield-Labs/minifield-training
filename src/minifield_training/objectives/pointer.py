@@ -39,3 +39,55 @@ def terms(
     """
     weights = batch["field_weight"].astype(jnp.float32)
     return jnp.sum(losses(outputs, batch) * weights), jnp.sum(weights)
+
+
+def distillation(
+    teacher: types.DeviceBatch,
+    student: types.DeviceBatch,
+    batch: types.DeviceBatch,
+    *,
+    temperature: float,
+) -> jax.Array:
+    """Return ``[requests, questions]`` KL(teacher || student) times T².
+
+    Both pointers soften over the question's allowed tokens at the same
+    ``temperature``; the mean of start and end is returned. Gradients reach
+    only the student.
+    """
+    allowed = batch["allowed"].astype(bool)
+    total = jnp.zeros(allowed.shape[:-1], jnp.float32)
+
+    def log_probs(logits: jax.Array) -> jax.Array:
+        scaled = logits.astype(jnp.float32) / temperature
+        return jax.nn.log_softmax(jnp.where(allowed, scaled, _MASKED), -1)
+
+    for end in ("start", "end"):
+        target = jax.lax.stop_gradient(log_probs(teacher[end]))
+        divergence = jnp.exp(target) * (target - log_probs(student[end]))
+        total = total + jnp.sum(jnp.where(allowed, divergence, 0), axis=-1)
+    return total * (temperature**2) / 2
+
+
+def distilled_terms(
+    dense: types.DeviceBatch,
+    quantized: types.DeviceBatch,
+    batch: types.DeviceBatch,
+    *,
+    quantized_weight: float = 1.0,
+    distill_weight: float = 1.0,
+    temperature: float = 2.0,
+) -> tuple[jax.Array, jax.Array]:
+    """Train shared weights as a dense parent and a quantized student at once.
+
+    Each question's loss is the dense cross-entropy, plus the quantized
+    cross-entropy and the quantized pass's distillation from the dense one,
+    weighted as given. Type balancing and the weight mass match ``terms``.
+    """
+    weights = batch["field_weight"].astype(jnp.float32)
+    per_question = (
+        losses(dense, batch)
+        + quantized_weight * losses(quantized, batch)
+        + distill_weight
+        * distillation(dense, quantized, batch, temperature=temperature)
+    )
+    return jnp.sum(per_question * weights), jnp.sum(weights)

@@ -372,3 +372,49 @@ def test_checkout_refuses_an_existing_non_git_directory(
         _execute(_cells()[1], namespace)
     assert preserved.read_text(encoding="utf-8") == "keep existing files"
     assert not (checkout / ".git").exists()
+
+
+def test_final_cell_copies_results_and_bundles(tmp_path: Path) -> None:
+    """COPY_TO keeps bundles and results past the runtime, not checkpoints."""
+    output = tmp_path / "magicbox-full-1dev"
+    (output / "checkpoints" / "step-00000010").mkdir(parents=True)
+    (output / "metrics").mkdir()
+    (output / "metrics" / "step.json").write_text("{}")
+    for name in ("run.json", "progress.jsonl", "final-ood.json"):
+        (output / name).write_text("{}")
+
+    def bundle_at(name: str) -> Path:
+        (output / name).mkdir()
+        (output / name / "model.safetensors").write_text("weights")
+        return output / name
+
+    namespace: dict[str, Any] = dict(
+        json=json,
+        Path=Path,
+        OUTPUT=output,
+        COPY_TO=str(tmp_path / "drive"),
+        RUN_MODE="full",
+        FINAL_RECORDS=0,
+        cursor=SimpleNamespace(next_batch=10),
+        current={"params": {}},
+        evaluator=object(),
+        run=SimpleNamespace(stream=SimpleNamespace(total_updates=10)),
+        train=SimpleNamespace(
+            save_bundle=lambda *_args: bundle_at("bundle-x"),
+            final_evaluation=lambda *_args: None,
+            export_device_bundles=lambda *_args: [bundle_at("device-x-fp32")],
+        ),
+    )
+    _execute(_cells()[15], namespace)
+    copied = tmp_path / "drive" / output.name
+    assert sorted(path.name for path in copied.iterdir()) == [
+        "bundle-x",
+        "device-x-fp32",
+        "final-ood.json",
+        "metrics",
+        "progress.jsonl",
+        "run.json",
+    ]
+    assert (
+        copied / "device-x-fp32" / "model.safetensors"
+    ).read_text() == "weights"

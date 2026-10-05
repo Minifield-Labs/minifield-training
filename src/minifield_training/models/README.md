@@ -52,6 +52,10 @@ construct or load an unused vocabulary head. `encoder.MAX_SEQUENCE_LENGTH`
 owns its admitted 8,192-token limit independently of the source RoPE metadata.
 Passing `segment_ids` and per-segment `positions` together encodes packed rows;
 each segment matches its separately padded encoding in FP32 and BF16 CPU tests.
+`encode(..., attention_options=encoder.Attention(...))` selects the attention
+kernel (`dense` or `splash`) and an optional ModernBERT-style layout: with
+`local_window`, the first of every `global_every` attention layers stays
+global and the others attend locally. Weights and checkpoints don't change.
 
 `magicbox.model` accepts an injected shared encoder callable. Source tokens
 are encoded once per request; independent schema rows read the resulting

@@ -9,6 +9,7 @@ import pytest
 from minifield_training.core import parameters as core_parameters
 from minifield_training.optimizers import adamw
 from minifield_training.optimizers import optax_adamw
+from minifield_training.optimizers import schedule as lr_schedule
 from minifield_training.optimizers import state
 
 _CONFIG = adamw.AdamWConfig(
@@ -46,6 +47,7 @@ def _gradients(scale: float = 1.0) -> dict[str, jax.Array]:
 
 def _oracle(
     steps: list[dict[str, npt.NDArray[np.float32]]],
+    factors: tuple[float, ...] | None = None,
 ) -> dict[str, dict[str, npt.NDArray[np.float64]]]:
     """Clip by the global norm, then decoupled AdamW, in float64."""
     params = {
@@ -70,9 +72,10 @@ def _oracle(
             decay = (
                 _CONFIG.weight_decay * params[name] if name == "matrix" else 0
             )
-            params[name] = params[name] - _CONFIG.learning_rate * (
-                direction + decay
+            rate = _CONFIG.learning_rate * (
+                1.0 if factors is None else factors[iteration - 1]
             )
+            params[name] = params[name] - rate * (direction + decay)
     return {"params": params, "m": m, "v": v}
 
 
@@ -140,4 +143,38 @@ def test_identity_is_separate_from_the_transactional_commit() -> None:
     assert identity != _CONFIG.implementation_identity
     assert identity != optax_adamw.implementation_identity(
         adamw.AdamWConfig(learning_rate=0.2)
+    )
+
+
+def test_scheduled_commits_use_the_rate_for_each_committed_step() -> None:
+    """Update n applies learning_rate * factor(n), decay included."""
+    plan = lr_schedule.WarmupCosine(2, 6, final_fraction=0.1)
+    transition = jax.jit(
+        optax_adamw.make_transaction(_inventory(), _CONFIG, plan)
+    )
+    current = _state()
+    steps = [_gradients(), _gradients(0.3)]
+    for gradients in steps:
+        current = transition(
+            current, gradients, jnp.float32(1.5), jnp.asarray(True)
+        ).state
+    expected = _oracle(
+        [{k: np.asarray(v) for k, v in g.items()} for g in steps], (0.5, 1.0)
+    )
+    for name, value in expected["params"].items():
+        np.testing.assert_allclose(
+            current["params"][name], value, rtol=2e-6, atol=1e-7
+        )
+
+
+def test_schedule_changes_identity_only_when_present() -> None:
+    """Constant-rate checkpoints keep their identity; schedules bind theirs."""
+    plain = optax_adamw.implementation_identity(_CONFIG)
+    assert optax_adamw.implementation_identity(_CONFIG, None) == plain
+    scheduled = optax_adamw.implementation_identity(
+        _CONFIG, lr_schedule.WarmupCosine(2, 6)
+    )
+    assert scheduled != plain
+    assert scheduled != optax_adamw.implementation_identity(
+        _CONFIG, lr_schedule.WarmupCosine(3, 6)
     )
