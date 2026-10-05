@@ -208,17 +208,35 @@ def write_trimmed_tokenizer(
     trimmed_spec, kept = trim_tokenizer(
         spec, used_ids(original, corpus_texts(corpus))
     )
-    trimmed_spec = rename_special_tokens(trimmed_spec, rename or {})
+    write_tokenizer(trimmed_spec, kept, dataset_tokenizer, destination, rename)
+    check_trimmed(
+        original,
+        Tokenizer.from_file(str(destination / "tokenizer.json")),
+        kept,
+        corpus_texts(corpus),
+    )
+    return kept
+
+
+def write_tokenizer(
+    spec: dict[str, object],
+    kept: tuple[int, ...],
+    dataset_tokenizer: Path,
+    destination: Path,
+    rename: Mapping[str, str] | None = None,
+) -> None:
+    """Write a trimmed tokenizer and its contract, derived from the dataset's.
+
+    ``kept`` lists the original IDs of the trimmed tokenizer's IDs, in order.
+    """
+    spec = rename_special_tokens(spec, rename or {})
     destination.mkdir(parents=True, exist_ok=True)
     path = destination / "tokenizer.json"
     with tempfile.NamedTemporaryFile(
         "w", dir=destination, suffix=".json", delete=False
     ) as handle:
-        json.dump(trimmed_spec, handle, ensure_ascii=False)
+        json.dump(spec, handle, ensure_ascii=False)
     Path(handle.name).rename(path)
-    check_trimmed(
-        original, Tokenizer.from_file(str(path)), kept, corpus_texts(corpus)
-    )
     contract = json.loads((dataset_tokenizer / "contract.json").read_text())
     contract.update(
         sha256=json_io.digest_file(path),
@@ -230,4 +248,3 @@ def write_trimmed_tokenizer(
     (destination / "contract.json").write_text(
         json.dumps(contract, indent=2), encoding="utf-8"
     )
-    return kept

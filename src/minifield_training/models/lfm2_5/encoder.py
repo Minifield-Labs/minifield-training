@@ -32,6 +32,34 @@ SOURCE = contracts.PretrainedSource(
         "cd70e404c3c6c1756b2cf5dc75de2a87788b460e3a6156c1a4ab134b824c2706"
     ),
 )
+# The smaller release: 14 layers and a narrower feed-forward, same width,
+# tokenizer and embeddings.
+SOURCE_230M = contracts.PretrainedSource(
+    model_id="LiquidAI/LFM2.5-Encoder-230M",
+    revision="0b649ad0c684378b03d4d8304f7577a662ab89bc",
+    config_sha256=(
+        "d1dd6a8e1ffcbac50e48aa32a03c1cfcc473c417fc04a006bb6623ea28119aff"
+    ),
+    tokenizer_sha256=(
+        "1efc3a6609abf6b63b1f47188d139f3b59973a6a434dffe970a7261a51ed2711"
+    ),
+    weights_sha256=(
+        "e2365f4805d311697d46c9aa326e50862466dab0b62c94b67c22b61aa779e45d"
+    ),
+)
+
+
+def sources() -> tuple[contracts.PretrainedSource, ...]:
+    """Every pinned release, read when called."""
+    return (SOURCE, SOURCE_230M)
+
+
+def source_for_config(config_sha256: str) -> contracts.PretrainedSource:
+    """The pinned release whose config has this digest."""
+    for source in sources():
+        if source.config_sha256 == config_sha256:
+            return source
+    raise ValueError("Encoder config matches no pinned source")
 
 
 @dataclasses.dataclass(frozen=True)

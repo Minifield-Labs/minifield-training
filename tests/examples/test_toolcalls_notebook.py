@@ -14,7 +14,9 @@ from examples.magicbox import bundle as magicbox_bundle
 from examples.magicbox import smoke
 from examples.magicbox import tokenizer
 from examples.toolcalls import composition
+from examples.toolcalls import data
 from examples.toolcalls import train as curriculum
+from examples.toolcalls import warmup
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.magicbox import pointer
 
@@ -67,18 +69,56 @@ def test_curriculum_cell_runs_every_stage_with_the_mode_cap(
         OUTPUT=tmp_path / "out",
         DEVICES=1,
         ROWS=4,
+        SOURCE=encoder.SOURCE_230M,
+        TEXT=None,
     )
-    _execute(_cells()[5], namespace)
+    _execute(_cells()[5], namespace)  # No warm-up text: the pretrained start.
+    _execute(_cells()[6], namespace)
     call = calls[0]
     assert len(calls) == 1
     assert call["stages"] == (0, 1, 2, 3)
     assert call["max_updates"] == cap
-    assert call["base"].quantizer == "nf4"
+    assert call["base"].quantizer == "ternary"
+    assert call["base"].encoder_source == encoder.SOURCE_230M
+    assert call["base"].encoder_weights is None
     assert sorted(namespace["bundles"]) == [0, 1, 2, 3]
     assert json.loads((tmp_path / "out" / "progress.jsonl").read_text()) == {
         "event": "stage",
         "stage": 0,
     }
+
+
+@pytest.mark.parametrize("finished", (True, False))
+def test_warmup_cell_feeds_the_curriculum_or_asks_to_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finished: bool
+) -> None:
+    """A finished warm-up's file seeds the curriculum; a stopped one halts."""
+    namespace = _settings(tmp_path, "full")
+    runs: list[Any] = []
+
+    def run(settings: Any, **kwargs: Any) -> Path | None:
+        runs.append((settings, kwargs))
+        return tmp_path / "encoder.safetensors" if finished else None
+
+    monkeypatch.setattr(warmup, "run", run)
+    namespace.update(
+        encoder=encoder,
+        DATASET=tmp_path / "dataset",
+        OUTPUT=tmp_path / "out",
+        SOURCE=encoder.SOURCE_230M,
+        TEXT=tmp_path / "text.parquet",
+    )
+    if not finished:
+        with pytest.raises(RuntimeError, match="Rerun this cell"):
+            _execute(_cells()[5], namespace)
+        return
+    _execute(_cells()[5], namespace)
+    settings, kwargs = runs[0]
+    assert namespace["WARMED"] == tmp_path / "encoder.safetensors"
+    assert settings.quantizer == "ternary"
+    assert settings.encoder_source == encoder.SOURCE_230M
+    assert settings.tokens == 130_000_000
+    assert kwargs["session_seconds"] == 5 * 3600
 
 
 def test_settings_reject_unknown_stages(tmp_path: Path) -> None:
@@ -106,7 +146,7 @@ def test_copy_cell_keeps_bundles_and_results_per_stage(tmp_path: Path) -> None:
         COPY_TO=str(tmp_path / "drive"),
         STAGES=(0, 1),
     )
-    _execute(_cells()[6], namespace)
+    _execute(_cells()[7], namespace)
     copied = tmp_path / "drive" / output.name
     assert sorted(path.name for path in (copied / "stage0").iterdir()) == [
         "bundle-x",
@@ -138,15 +178,23 @@ def test_predict_cell_runs_a_folded_bundle(
         return cfg, head, folded, {"presence_threshold": 0.5}
 
     monkeypatch.setattr(magicbox_bundle, "load_pointer", load_pointer)
+    names = {"<|startoftext|>": data.BOS} | {
+        f"<|{name}|>": index for name, index in data.MARKER_IDS.items()
+    }
     monkeypatch.setattr(
-        tokenizer, "Adapter", lambda _: SimpleNamespace(encode=smoke.toy_encode)
+        tokenizer,
+        "Adapter",
+        lambda _: SimpleNamespace(
+            encode=smoke.toy_encode,
+            tokenizer=SimpleNamespace(token_to_id=names.get),
+        ),
     )
     namespace: dict[str, Any] = {
         "json": json,
         "bundles": {0: tmp_path / "stage0", 3: tmp_path / "stage3"},
     }
-    _execute(_cells()[7], namespace)
-    assert loads == [(tmp_path / "stage3", ("toolcall-pointer/1",))]
+    _execute(_cells()[8], namespace)
+    assert loads == [(tmp_path / "stage3", ("toolcall-pointer/2",))]
     assert set(namespace["predictions"]) == {"next_tool", "pod_name"}
 
 

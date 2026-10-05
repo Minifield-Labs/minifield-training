@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from examples.magicbox import composition as magicbox
 from examples.magicbox import train
 from examples.toolcalls import data
+from examples.toolcalls import vocabulary
 from minifield_training.kernels import types
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.lfm2_5 import model as lfm
@@ -84,4 +85,5 @@ MODEL = train.Model(
     initialize=initialize,
     fold=with_markers,
     token_names=data.TOKEN_NAMES,
+    vocabulary=vocabulary.tokenizer_spec,
 )

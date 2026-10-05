@@ -172,8 +172,7 @@ def _save(
     output: inference_output.OutputStrategy | None = None,
 ) -> None:
     """Share the pinned encoder, tokenizer, and decode metadata."""
-    if json_io.digest_file(encoder_config) != encoder.SOURCE.config_sha256:
-        raise ValueError("Encoder config must match the pinned source")
+    source = encoder.source_for_config(json_io.digest_file(encoder_config))
     bundle_io.save(
         directory,
         parameters,
@@ -181,7 +180,7 @@ def _save(
         metadata={
             **model_metadata,
             "step": step,
-            "source": dataclasses.asdict(encoder.SOURCE),
+            "source": dataclasses.asdict(source),
             "decode": {"presence_threshold": 0.5, "confidence": None},
         },
         assets={
@@ -189,8 +188,8 @@ def _save(
             "tokenizer/tokenizer.json": tokenizer / "tokenizer.json",
             "tokenizer/contract.json": tokenizer / "contract.json",
         },
-        source_model=encoder.SOURCE.model_id,
-        source_revision=encoder.SOURCE.revision,
+        source_model=source.model_id,
+        source_revision=source.revision,
         output=output,
     )
 
@@ -199,12 +198,15 @@ def _encoder_config(
     directory: Path, metadata: dict[str, object], formats: tuple[str, ...]
 ) -> lfm.Config:
     """Admit a known format and the pinned encoder configuration."""
-    if metadata.get("format") not in formats or metadata.get(
-        "source"
-    ) != dataclasses.asdict(encoder.SOURCE):
+    sources = [dataclasses.asdict(item) for item in encoder.sources()]
+    if (
+        metadata.get("format") not in formats
+        or metadata.get("source") not in sources
+    ):
         raise ValueError("Unknown MagicBox bundle")
     files = json_io.object_map(metadata["files"])
-    if files["encoder.json"] != encoder.SOURCE.config_sha256:
+    source = json_io.object_map(metadata["source"])
+    if files["encoder.json"] != source["config_sha256"]:
         raise ValueError("Bundle encoder configuration changed")
     return encoder.Adapter().parse_config(
         json_io.object_map(json.loads((directory / "encoder.json").read_text()))

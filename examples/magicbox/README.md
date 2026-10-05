@@ -109,6 +109,10 @@ adapters to reusable batching, objectives, evaluation, and training lifecycle.
 extra trainable parameters, forward, initialization, the weights a bundle
 stores, and tokenizer renames. `MAGICBOX` is the default; the
 [tool-call model](../toolcalls/README.md) is the other one.
+`Model.vocabulary` gives a model its own tokenizer: bundles then ship it and
+only its embedding rows. `Settings.encoder_source` picks the pinned LFM2.5
+encoder (350M by default, or 230M), and `Settings.encoder_weights` starts
+from other encoder masters, such as a quantization warm-up's.
 `smoke.py` and `parallel_smoke.py` are bounded architecture diagnostics.
 No sibling source tree is imported.
 

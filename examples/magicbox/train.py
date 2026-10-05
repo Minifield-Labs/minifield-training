@@ -24,6 +24,7 @@ from examples.magicbox import source
 from minifield_training.batching import pointer as batching
 from minifield_training.batching import stream as streams
 from minifield_training.checkpoints import discovery
+from minifield_training.checkpoints import tensors
 from minifield_training.checkpoints import training_state
 from minifield_training.core import json_io
 from minifield_training.core import parameters as core_parameters
@@ -34,6 +35,7 @@ from minifield_training.evaluation import pointer as evaluate_pointer
 from minifield_training.evaluation import schema_fields as evaluate
 from minifield_training.kernels import bidirectional
 from minifield_training.kernels import types
+from minifield_training.models import contracts
 from minifield_training.models.lfm2_5 import encoder
 from minifield_training.models.lfm2_5 import model as lfm
 from minifield_training.models.magicbox import pointer
@@ -63,6 +65,9 @@ class Model:
     the encoder and pointer heads; ``bind`` builds the forward;
     ``initialize`` adds the extras to fresh pretrained weights; ``fold``
     turns trained masters back into plain pointer weights for bundles.
+    ``vocabulary``, given the dataset tokenizer folder, returns the tokenizer
+    JSON the model reads with and its original token IDs; bundles then ship
+    that tokenizer and only those embedding rows.
     """
 
     template: str
@@ -74,6 +79,9 @@ class Model:
     fold: Callable[[types.Parameters], types.Parameters] = lambda p: p
     # Readable names for special tokens in exported device tokenizers.
     token_names: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    vocabulary: (
+        Callable[[Path], tuple[dict[str, object], tuple[int, ...]]] | None
+    ) = None
 
 
 MAGICBOX = Model(data.POINTER_TEMPLATE, "magicbox-pointer-jax/1")
@@ -116,6 +124,10 @@ class Settings:
     distill_weight: float = 1.0
     temperature: float = 2.0
     model: Model = MAGICBOX
+    encoder_source: contracts.PretrainedSource = encoder.SOURCE
+    # Encoder masters to start from instead of the pretrained ones, such as a
+    # quantization warm-up's output.
+    encoder_weights: Path | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -160,7 +172,10 @@ def prepare(settings: Settings) -> Run:
         settings.dataset, settings.cache, allow_sample=settings.allow_sample
     )
     config_path = settings.model_dir / "config.json"
-    if json_io.digest_file(config_path) != encoder.SOURCE.config_sha256:
+    if (
+        json_io.digest_file(config_path)
+        != settings.encoder_source.config_sha256
+    ):
         raise ValueError("Pretrained config changed")
     cfg = encoder.Adapter().parse_config(
         json_io.object_map(json.loads(config_path.read_text()))
@@ -235,7 +250,7 @@ def prepare(settings: Settings) -> Run:
         else magicbox.quantization_plan(cfg, settings.quantizer)
     )
     identity: dict[str, object] = {
-        "source": dataclasses.asdict(encoder.SOURCE),
+        "source": dataclasses.asdict(settings.encoder_source),
         "encoder": dataclasses.asdict(cfg),
         "head": dataclasses.asdict(head),
         "shape": {
@@ -261,6 +276,10 @@ def prepare(settings: Settings) -> Run:
     # checkpoints keep theirs.
     if settings.attention != encoder.DEFAULT_ATTENTION:
         identity["attention"] = dataclasses.asdict(settings.attention)
+    if settings.encoder_weights is not None:
+        identity["encoder_weights"] = json_io.digest_file(
+            settings.encoder_weights
+        )
     if plan is not None:
         identity["qat"] = {
             "quantizer": plan.identity,
@@ -341,8 +360,17 @@ def initial_state(
         parameters = dict(warm_start)
     else:
         _, parameters = pretrained.load_verified(
-            run.settings.model_dir, encoder.SOURCE, encoder.Adapter()
+            run.settings.model_dir,
+            run.settings.encoder_source,
+            encoder.Adapter(),
         )
+        if run.settings.encoder_weights is not None:
+            parameters = tensors.load_masters(
+                run.settings.encoder_weights,
+                encoder.Adapter().expected_shapes(run.cfg),
+                source_dtype="F32",
+                sha256=str(run.identity["encoder_weights"]),
+            )
         parameters.update(
             pointer.initialize(run.head, jax.random.PRNGKey(run.settings.seed))
         )
@@ -582,6 +610,26 @@ def save_bundle(
     """Export the inference bundle once per run identity and step."""
     # The run identity keeps bundles from other settings in one output apart.
     bundle = output / f"bundle-{run.source_id[:12]}-{step:08d}"
+    if run.settings.model.vocabulary is not None:
+        # The model reads with its own vocabulary, so its bundle carries
+        # that tokenizer and only those embedding rows.
+        if not bundle.exists():
+            kept = device_tokenizer(run, output)
+            magicbox_bundle.save_device(
+                bundle,
+                export.trimmed_parameters(
+                    run.settings.model.fold(params), kept
+                ),
+                run.cfg,
+                run.head,
+                vocabulary=kept,
+                quantizer=None,
+                encoder_config=run.config_path,
+                tokenizer=output / f"device-tokenizer-{run.source_id[:12]}",
+                step=step,
+                template=run.settings.model.template,
+            )
+        return bundle
     if not bundle.exists():
         magicbox_bundle.save_pointer(
             bundle,
@@ -596,6 +644,37 @@ def save_bundle(
     return bundle
 
 
+def device_tokenizer(run: Run, output: Path) -> tuple[int, ...]:
+    """Write the device tokenizer once; return its original token IDs.
+
+    A model with its own vocabulary ships that; otherwise the dataset's
+    tokenizer is trimmed to every record and checked to reproduce them.
+    """
+    tokenizer = output / f"device-tokenizer-{run.source_id[:12]}"
+    # Written last, so its presence means the trimmed tokenizer is complete.
+    kept_path = tokenizer / "kept_ids.json"
+    if not kept_path.exists():
+        dataset_tokenizer = run.settings.dataset / "tokenizer"
+        if run.settings.model.vocabulary is None:
+            kept = export.write_trimmed_tokenizer(
+                dataset_tokenizer,
+                tokenizer,
+                run.corpus,
+                rename=run.settings.model.token_names,
+            )
+        else:
+            spec, kept = run.settings.model.vocabulary(dataset_tokenizer)
+            export.write_tokenizer(
+                spec,
+                kept,
+                dataset_tokenizer,
+                tokenizer,
+                rename=run.settings.model.token_names,
+            )
+        kept_path.write_text(json.dumps(kept))
+    return tuple(json.loads(kept_path.read_text()))
+
+
 def export_device_bundles(
     run: Run, params: types.Parameters, output: Path, step: int
 ) -> list[Path]:
@@ -606,17 +685,7 @@ def export_device_bundles(
     written. Existing bundles are kept.
     """
     tokenizer = output / f"device-tokenizer-{run.source_id[:12]}"
-    # Written last, so its presence means the trimmed tokenizer is complete.
-    kept_path = tokenizer / "kept_ids.json"
-    if not kept_path.exists():
-        kept = export.write_trimmed_tokenizer(
-            run.settings.dataset / "tokenizer",
-            tokenizer,
-            run.corpus,
-            rename=run.settings.model.token_names,
-        )
-        kept_path.write_text(json.dumps(kept))
-    kept = tuple(json.loads(kept_path.read_text()))
+    kept = device_tokenizer(run, output)
     trimmed = export.trimmed_parameters(run.settings.model.fold(params), kept)
     bundles = []
     quantizers: list[str | None] = [None]
