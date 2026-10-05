@@ -9,7 +9,7 @@ extract, choice or noul question over the same text.
 Open [the TPU notebook](../colab_toolcalls_lfm350m_tpu.ipynb) to train it.
 It clones the pinned `SOURCE_REVISION`, downloads
 `protodotdesign/toolcalls-v1` at revision
-`5b7faa42d1d00b9ed90fa826031165e23818ad1d` and trains the 4 curriculum
+`f4d88a672bfddda94e2bec7b5b8bfa15d33e586b` and trains the 4 curriculum
 stages in order:
 
 | Stage | Records |
