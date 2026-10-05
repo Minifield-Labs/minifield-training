@@ -9,7 +9,7 @@ extract, choice or noul question over the same text.
 Open [the TPU notebook](../colab_toolcalls_lfm350m_tpu.ipynb) to train it.
 It clones the pinned `SOURCE_REVISION`, downloads
 `protodotdesign/toolcalls-v1` at revision
-`9d63f7b434c26c2dadcead30a3152b55f9c298b1` and trains the 4 curriculum
+`5b7faa42d1d00b9ed90fa826031165e23818ad1d` and trains the 4 curriculum
 stages in order:
 
 | Stage | Records |
@@ -17,7 +17,7 @@ stages in order:
 | 0 | Single easy calls, with confusers added gradually |
 | 1 | Single calls among harder confusers and renamed tools |
 | 2 | Turns with several independent calls |
-| 3 | Calls that need an earlier call's result |
+| 3 | Calls that need an earlier call's result, including audited synthetic conversations |
 
 Every stage is its own run, with its own folder (`OUTPUT/stage{N}`),
 checkpoints, learning-rate schedule and optimizer state. A stage starts from
